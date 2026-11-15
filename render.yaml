@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: kav-ai
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: TEXT_MODEL
+        value: "gemini-3.5-flash-lite"
+      - key: TEXT_MODEL_FALLBACK
+        value: "gemini-3.1-flash-lite"
+      - key: TTS_MODEL
+        value: "gemini-3.8-flash-tts,gemini-3.1-flash-tts,gemini-3.8-flash-lite-tts,gemini-2.5-flash-tts"
+      - key: MAX_WORDS
+        value: "700"
+      - key: HISTORY_EXT
+        value: "9"
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: GEMINI_TTS_KEYS
+        sync: false
+      - key: GROQ_API_KEYS
+        sync: false
+      - key: YEMOT_TOKEN
+        sync: false
