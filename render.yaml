@@ -15,11 +15,15 @@ services:
       - key: TEXT_MODEL_FALLBACK
         value: "gemini-3.1-flash-lite"
       - key: TTS_MODEL
-        value: "gemini-3.8-flash-tts,gemini-3.1-flash-tts,gemini-3.8-flash-lite-tts,gemini-2.5-flash-tts"
+        value: "gemini-3.8-flash-tts,gemini-3.8-flash-lite-tts,gemini-3.1-flash-tts-preview,gemini-2.5-flash-preview-tts"
       - key: MAX_WORDS
         value: "700"
       - key: HISTORY_EXT
         value: "9"
+      - key: VOICE
+        value: "Charon"
+      - key: VOICE_FEMALE
+        value: "Kore"
       - key: GEMINI_API_KEYS
         sync: false
       - key: GEMINI_TTS_KEYS
