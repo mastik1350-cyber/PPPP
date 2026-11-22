@@ -542,7 +542,7 @@ async function jamendoSearch(s, query, sort, deadline) {
 }
 // ---------- YouTube through yt-dlp ----------
 let ytCookies = null;
-function ytArgs() {
+function ytCookieArgs() {
   // a Render secret file named cookies.txt is found here automatically
   let sf = process.env.YOUTUBE_COOKIES_FILE || '';
   if (!sf) { try { const f = fs.readdirSync('/etc/secrets').find(n => /cookie/i.test(n)); if (f) sf = '/etc/secrets/' + f; } catch (e) {} }
@@ -554,6 +554,11 @@ function ytArgs() {
   if (!c) return [];
   if (!ytCookies) { ytCookies = path.join(os.tmpdir(), 'yt-cookies.txt'); fs.writeFileSync(ytCookies, c.replace(/\\n/g, '\n')); }
   return ['--cookies', ytCookies];
+}
+// YOUTUBE_PROXY (optional): a proxy for yt-dlp, the usual cure when YouTube blocks the addresses of the server (HTTP 403)
+function ytArgs(noCookies) {
+  const px = String(process.env.YOUTUBE_PROXY || '').trim();
+  return [...(px ? ['--proxy', px] : []), ...(noCookies ? [] : ytCookieArgs())];
 }
 async function ytSearch(query, deadline) {
   const { stdout } = await execFileP(YTDLP, ['ytsearch8:' + query, '--flat-playlist', '-J', '--no-warnings', ...ytArgs()],
@@ -571,29 +576,32 @@ if (HAS_YT) setTimeout(() => {
     .catch(e => console.error('youtube warm-up failed:', (e.killed ? 'timed out; ' : '') + String(e.stderr || e.message).replace(/\s+/g, ' ').slice(-300)));
 }, 3000).unref();
 // downloads the audio of one video into dir and returns the file path
-async function ytDownload(url, dir, dl, s) {
-  const pr = s ? makeProg(s, 'הורדה') : null;
+async function ytDownload(url, dir, dl, s, pr) {
   const left = () => Math.max(5000, dl - Date.now());
-    // YouTube often blocks one client from server addresses, so other clients are tried before giving up
-    const clients = ytArgs().length ? ['', 'tv,web_safari'] : [''];
-    let file = '', why = '';
-    for (const c of clients) {
-      if (dl - Date.now() < 15000) break;
-      try {
-        const { stdout } = await runLines(YTDLP, [url, '--no-playlist', ...YT_PRG_ARGS, '--no-warnings', '-f', 'bestaudio/best',
-          '-o', path.join(dir, 'in.%(ext)s'), '--print', 'after_move:filepath', '--no-simulate',
-          // YouTube's JavaScript challenge needs a JS runtime: the Node that runs this server, plus the solver script from GitHub
-          '--js-runtimes', 'node:' + process.execPath, '--remote-components', 'ejs:github',
-          ...(c ? ['--extractor-args', 'youtube:player_client=' + c] : []), ...ytArgs()],
-          { timeout: Math.min(left(), c ? 40000 : 100000) }, ytProgress(f => pr && pr.set(f * 100)));
-        file = stdout.trim().split('\n').pop().trim();
-        if (file) { if (c) console.log('youtube download ok with client', c); break; }
-      } catch (e) {
-        why = (e.killed ? 'timed out; ' : '') + String(e.stderr || e.message).replace(/\s+/g, ' ').trim().slice(-300);
-        console.error('youtube download failed (client ' + (c || 'default') + '):', why);
-      }
+  // YouTube often blocks one client from server addresses, so other clients are tried before giving up.
+  // android_vr does not support cookies, so it runs without them
+  const hasCk = ytCookieArgs().length > 0;
+  const tries = [{ c: '', ck: true }, { c: 'tv,web_safari', ck: true }, { c: 'android_vr', ck: false }, { c: 'mweb', ck: true }, { c: 'web_embedded', ck: true }]
+    .filter(t => hasCk || t.ck === false || t.c === '' || t.c === 'mweb' || t.c === 'web_embedded');
+  let file = '', why = '';
+  for (const t of tries) {
+    if (dl - Date.now() < 15000) break;
+    try {
+      const { stdout } = await runLines(YTDLP, [url, '--no-playlist', ...YT_PRG_ARGS, '--no-warnings', '-f', 'bestaudio/best',
+        '-o', path.join(dir, 'in.%(ext)s'), '--print', 'after_move:filepath', '--no-simulate',
+        // YouTube's JavaScript challenge needs a JS runtime: the Node that runs this server, plus the solver script from GitHub
+        '--js-runtimes', 'node:' + process.execPath, '--remote-components', 'ejs:github',
+        ...(t.c ? ['--extractor-args', 'youtube:player_client=' + t.c] : []), ...ytArgs(!t.ck)],
+        { timeout: Math.min(left(), t.c ? 45000 : 100000) }, ytProgress(f => pr && pr.set(YT_DL_SHARE * f)));
+      file = stdout.trim().split('\n').pop().trim();
+      if (file && fs.existsSync(file)) { if (t.c) console.log('youtube download ok with client', t.c); break; }
+      file = '';
+    } catch (e) {
+      why = (e.killed ? 'timed out; ' : '') + String(e.stderr || e.message).replace(/\s+/g, ' ').trim().slice(-300);
+      console.error('youtube download failed (client ' + (t.c || 'default') + '):', why);
     }
-    if (!file) throw new Error('youtube: ' + (why || 'no file'));
+  }
+  if (!file) throw new Error('youtube: ' + (why || 'no file'));
   return file;
 }
 async function prepareYoutube(item, d, dl, s) {
@@ -604,12 +612,13 @@ async function prepareYoutube(item, d, dl, s) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), name + '-'));
   try {
     const left = () => Math.max(5000, dl - Date.now());
+    const pr = makeProg(s, ''); // one progress for all of it: quarter, half, three quarters, and then the playback
     announce(s, 'מוריד קובץ מיוטיוב לשרת');
-    const file = await ytDownload(item.url, dir, dl, s);
+    const file = await ytDownload(item.url, dir, dl, s, pr);
     await voiceCheck(file, key, dl);
-    announce(s, 'מחלץ אודיו');
-    await ffmpegRun(['-i', file, '-vn', '-t', String(MEDIA_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', path.join(dir, 'out.wav')], { timeout: left(), limit: MEDIA_MAX_SEC, s });
-    announce(s, 'מכין את הקובץ להשמעה');
+    pr.set(YT_DL_SHARE);
+    await ffmpegRun(['-i', file, '-vn', '-t', String(MEDIA_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', path.join(dir, 'out.wav')], { timeout: left(), limit: MEDIA_MAX_SEC, prog: pr, from: YT_DL_SHARE, to: 95 });
+    pr.set(95);
     await upload(name, fs.readFileSync(path.join(dir, 'out.wav')), dl, d, 60000);
     mediaDone[key] = true;
     return { name };
@@ -646,7 +655,13 @@ function progSay(s, word, job, label) {
   if (!PROG_SAY_ON || !s) return;
   const many = job && driveJobs.filter(j => j.state === 'running').length > 1;
   const text = (many ? shortName(job.title) + ': ' : '') + (label ? label + ' ' : '') + word;
-  if (s.job) { announce(s, text); return; } // a turn is waiting: said together with the waiting messages, no extra delay
+  if (s.job) { // a turn is waiting: said together with the waiting messages, no extra delay; no quarter is dropped
+    if (!s.progPend) s.progPend = [];
+    const t = sp(text);
+    if (t && !s.progPend.includes(t)) s.progPend.push(t);
+    announce(s, text);
+    return;
+  }
   if (!s.progQ) s.progQ = [];
   const key = job ? 'j' + job.t : 'l' + (label || '');
   s.progQ = s.progQ.filter(x => x.key !== key);
@@ -695,11 +710,12 @@ function ytProgress(report) {
     if (tot) { const f = Math.min(1, done / tot); report(stream === 0 ? 0.9 * f : 0.9 + 0.1 * f); }
   };
 }
-const YT_PRG_ARGS = ['--newline', '--progress-template', 'download:PRG %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s'];
+const YT_DL_SHARE = 70; // of the whole preparation of a song, the download is 0-70, the extraction 70-95, the upload 95-100
+const YT_PRG_ARGS = ['--progress', '--newline', '--progress-template', 'download:PRG %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s'];
 // ffmpeg with progress: the percent comes from out_time and the duration of the input (limited by -t); o.s = the session that hears the quarters
 function ffmpegRun(args, o) {
   o = o || {};
-  const pr = o.s ? makeProg(o.s, 'חילוץ') : null;
+  const pr = o.prog ? { set: p => o.prog.set(o.from + (o.to - o.from) * p / 100) } : (o.s ? makeProg(o.s, 'חילוץ') : null);
   return new Promise((resolve, reject) => {
     const p = spawn(FFMPEG, ['-y', '-hide_banner', '-nostats', '-progress', 'pipe:1', '-v', 'info', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
     let err = '', total = 0, buf = '', killed = false;
@@ -845,7 +861,7 @@ async function ytDownloadVideo(url, dir, dl, job) {
   const left = () => Math.max(5000, dl - Date.now());
   const h = DRIVE_MAX_HEIGHT;
   const fmt = 'bv*[height<=' + h + '][ext=mp4]+ba[ext=m4a]/b[height<=' + h + '][ext=mp4]/bv*[height<=' + h + ']+ba/b[height<=' + h + ']/b';
-  const clients = ytArgs().length ? ['', 'tv,web_safari'] : [''];
+  const clients = ytCookieArgs().length ? ['', 'tv,web_safari'] : [''];
   let file = '', why = '';
   for (const c of clients) {
     if (dl - Date.now() < 15000) break;
@@ -3128,7 +3144,13 @@ function armStatus(s) { s.statusSig = new Promise(res => { s.onStatus = res; });
 function statusMsg(s) {
   let msg = '';
   if (!s.waitSaid) { s.waitSaid = true; msg = WAIT_MSG; }
-  else if (s.say && s.say.length) { msg = s.say[s.say.length - 1]; s.say = []; s.lastSay = msg; } // only the latest one: it is what is happening now
+  else if (s.say && s.say.length) {
+    // the latest status is what is happening now, but quarters of progress that were not said yet are said before it
+    const latest = s.say[s.say.length - 1];
+    const pend = (s.progPend || []).filter(x => x !== latest);
+    msg = (pend.length ? pend.join('. ') + '. ' : '') + latest;
+    s.say = []; s.progPend = []; s.lastSay = latest;
+  }
   if (!msg) return '';
   s.hn++;
   return 'read=t-' + msg + '=H' + s.e + s.hn + ',no,1,1,1' + TAP_EMPTY;
@@ -3141,6 +3163,7 @@ function runTurn(s, q, id, T0, typed) {
   s.mediaJob = false;
   s.waitSaid = false;
   s.say = [];
+  s.progPend = [];
   s.lastSay = '';
   armStatus(s);
   s.holdP = songsFor(s.ph).catch(() => []);
