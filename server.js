@@ -250,10 +250,10 @@ async function gem(model, body, deadline, pool, opt) {
       }, opt.ms || 25000, deadline);
       if (r.ok) return await r.json();
       status = r.status;
-      const body = (await r.text()).slice(0, 200);
-      err = model + ' ' + r.status + ' ' + body;
+      const errBody = (await r.text()).slice(0, 200);
+      err = model + ' ' + r.status + ' ' + errBody;
       // a key that is invalid or has no permission is skipped (the next key is tried); a quota error is named too
-      const keyBad = (r.status === 400 && /API key (not valid|expired)|API_KEY_INVALID/i.test(body)) || (r.status === 403 && /PERMISSION_DENIED|API key|suspended/i.test(body));
+      const keyBad = (r.status === 400 && /API key (not valid|expired)|API_KEY_INVALID/i.test(errBody)) || (r.status === 403 && /PERMISSION_DENIED|API key|suspended/i.test(errBody));
       if (keyBad || r.status === 429) { if (!badTags.includes(tag)) badTags.push(tag); noteKey(tag, key, err); }
       if (!RETRY_STATUS.includes(r.status) && !keyBad) break;
     } catch (e) {
@@ -1360,6 +1360,7 @@ const PROBLEM_RULES = [
   [/jamendo/i, 'החיפוש לא זמין כרגע', () => 'החיפוש ב Jamendo נכשל. בדוק את מזהה הלקוח של Jamendo'],
   [/groq|search unavailable/i, 'החיפוש באינטרנט לא זמין כרגע', () => 'החיפוש באינטרנט נכשל'],
   [/media download \d+|no playable file found/i, 'לא הצלחתי להשיג את הקובץ', () => 'הורדת הקובץ מהאינטרנט נכשלה או שלא נמצא קובץ שאפשר להשמיע'],
+  [/before initialization|is not defined|is not a function|Cannot read propert|Cannot access/i, '', () => 'באג בקוד של השרת. פרטים בלוג ברנדר'],
   [/ENOSPC/, '', () => 'אין מקום פנוי בדיסק של השרת'],
   [/ENOENT/, '', () => 'חסרה תוכנה בשרת. yt-dlp לא נמצא'],
   [/gemini[\w.-]* 400/i, '', () => 'ג׳מיני דחה את הבקשה'],
