@@ -213,6 +213,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 function hint(msg) {
   const m = String(msg || '');
   const H = [
+    [/youtube cookies/, 'העוגיות של יוטיוב פגו או נחסמו: לייצא cookies.txt חדש (חלון גלישה בסתר, חשבון נפרד), להעלות כ-Secret File ולהפעיל מחדש'],
+    [/youtube no cookies/, 'חסרות עוגיות של יוטיוב: להעלות cookies.txt כ-Secret File ברנדר'],
     [/media download \d+/, 'הקישור של הקובץ שגוי או חסום: לבדוק את הקישור ב-MEDIA_FILES'],
     [/GROQ_API_KEYS is empty/, 'להגדיר GROQ_API_KEYS בהגדרות השרת ברנדר'],
     [/jamendo/i, 'לבדוק את JAMENDO_CLIENT_ID (מזהה לקוח מ-developer.jamendo.com)'],
@@ -555,6 +557,30 @@ function ytCookieArgs() {
   if (!ytCookies) { ytCookies = path.join(os.tmpdir(), 'yt-cookies.txt'); fs.writeFileSync(ytCookies, c.replace(/\\n/g, '\n')); }
   return ['--cookies', ytCookies];
 }
+// ---- cookies of YouTube: checks the cookies file (does it exist, does it hold the login cookies, did they expire) ----
+// it cannot know whether YouTube cancelled them on its side, but it catches a missing, empty or expired file
+function ytCookieStatus() {
+  const a = ytCookieArgs();
+  if (!a.length) return { ok: false, text: 'לא הוגדרו עוגיות ליוטיוב: להעלות cookies.txt כ-Secret File ברנדר (או להגדיר YOUTUBE_COOKIES)' };
+  let txt = '';
+  try { txt = fs.readFileSync(a[1], 'utf8'); } catch (e) { return { ok: false, text: 'קובץ העוגיות לא נקרא: ' + String(e.message).slice(0, 80) }; }
+  const LOGIN = ['SID', '__Secure-1PSID', '__Secure-3PSID', 'SAPISID', '__Secure-3PAPISID', 'LOGIN_INFO'];
+  const found = {};
+  for (const line of txt.split(/\r?\n/)) {
+    const l = line.replace(/^#HttpOnly_/, '');
+    if (!l.trim() || l.startsWith('#')) continue;
+    const f = l.split('\t');
+    if (f.length < 7 || !/(youtube|google)\.com$/.test(f[0].replace(/^\./, ''))) continue;
+    if (LOGIN.includes(f[5])) found[f[5]] = Number(f[4]) || 0;
+  }
+  const names = Object.keys(found);
+  if (!names.length) return { ok: false, text: 'בקובץ העוגיות אין עוגיות התחברות של חשבון (SID, 3PSID): לייצא מחדש כשמחוברים ליוטיוב' };
+  const now = Date.now() / 1000;
+  const live = names.filter(n => !found[n] || found[n] > now);
+  if (!live.length) return { ok: false, text: 'עוגיות ההתחברות פגו (' + new Date(Math.max(...names.map(n => found[n])) * 1000).toISOString().slice(0, 10) + '): לייצא עוגיות חדשות' };
+  const exp = live.map(n => found[n]).filter(x => x > 0);
+  return { ok: true, text: 'קובץ העוגיות תקין' + (exp.length ? ', התוקף עד ' + new Date(Math.min(...exp) * 1000).toISOString().slice(0, 10) : '') + ' (יוטיוב עדיין יכול לבטל אותן מצידו)' };
+}
 // YOUTUBE_PROXY (optional): a proxy for yt-dlp, the usual cure when YouTube blocks the addresses of the server (HTTP 403)
 function ytArgs(noCookies) {
   const px = String(process.env.YOUTUBE_PROXY || '').trim();
@@ -569,7 +595,10 @@ async function ytSearch(query, deadline) {
     .filter(x => x.title).slice(0, 6);
 }
 // at startup: fetches YouTube's challenge solver once (it is cached), so the first song of a call is not slowed by it
-if (HAS_YT) setTimeout(() => {
+if (HAS_YT) setTimeout(async () => {
+  { const cs = ytCookieStatus(); (cs.ok ? console.log : console.error)('[עוגיות] ' + cs.text); }
+  try { const u = await execFileP(YTDLP, ['-U'], { timeout: 60000 }); console.log('yt-dlp update:', String(u.stdout || '').replace(/\s+/g, ' ').trim().slice(-120)); }
+  catch (e) { console.error('yt-dlp update skipped:', String(e.stderr || e.message).replace(/\s+/g, ' ').slice(-120)); }
   execFileP(YTDLP, ['ytsearch1:niggun', '--simulate', '--no-warnings', '-f', 'bestaudio/best',
     '--js-runtimes', 'node:' + process.execPath, '--remote-components', 'ejs:github', ...ytArgs()], { timeout: 120000 })
     .then(() => console.log('youtube warm-up ok'))
@@ -581,9 +610,10 @@ async function ytDownload(url, dir, dl, s, pr) {
   // YouTube often blocks one client from server addresses, so other clients are tried before giving up.
   // android_vr does not support cookies, so it runs without them
   const hasCk = ytCookieArgs().length > 0;
-  const tries = [{ c: '', ck: true }, { c: 'tv,web_safari', ck: true }, { c: 'android_vr', ck: false }, { c: 'mweb', ck: true }, { c: 'web_embedded', ck: true }]
-    .filter(t => hasCk || t.ck === false || t.c === '' || t.c === 'mweb' || t.c === 'web_embedded');
+  const tries = [{ c: '', ck: true }, { c: 'tv,web_safari', ck: true }, { c: 'android_vr', ck: false }]
+    .filter(t => hasCk || t.ck === false || t.c === '');
   let file = '', why = '';
+  const whys = [];
   for (const t of tries) {
     if (dl - Date.now() < 15000) break;
     try {
@@ -592,16 +622,27 @@ async function ytDownload(url, dir, dl, s, pr) {
         // YouTube's JavaScript challenge needs a JS runtime: the Node that runs this server, plus the solver script from GitHub
         '--js-runtimes', 'node:' + process.execPath, '--remote-components', 'ejs:github',
         ...(t.c ? ['--extractor-args', 'youtube:player_client=' + t.c] : []), ...ytArgs(!t.ck)],
-        { timeout: Math.min(left(), t.c ? 45000 : 100000) }, ytProgress(f => pr && pr.set(YT_DL_SHARE * f)));
+        { timeout: Math.min(left(), t.c ? 25000 : 60000) }, ytProgress(f => pr && pr.set(Math.min(100, f * 100 / 0.9)))); // one audio stream: ytProgress ends it at 0.9
       file = stdout.trim().split('\n').pop().trim();
       if (file && fs.existsSync(file)) { if (t.c) console.log('youtube download ok with client', t.c); break; }
       file = '';
     } catch (e) {
       why = (e.killed ? 'timed out; ' : '') + String(e.stderr || e.message).replace(/\s+/g, ' ').trim().slice(-300);
+      whys.push(why);
       console.error('youtube download failed (client ' + (t.c || 'default') + '):', why);
     }
   }
-  if (!file) throw new Error('youtube: ' + (why || 'no file'));
+  if (!file) {
+    // a refusal of YouTube (403, no formats, "sign in") almost always means that the cookies are missing, expired or cancelled
+    const all = whys.join(' | ').slice(-500);
+    const cs = ytCookieStatus();
+    if (!hasCk) throw new Error('youtube no cookies: ' + all);
+    if (/403|Requested format is not available|Sign in to confirm|not a bot|cookies/i.test(all)) {
+      console.error('[שגיאת עוגיות] יוטיוב סירב להורדה. ' + cs.text + '. לייצא עוגיות חדשות: חלון גלישה בסתר, חשבון נפרד, לייצא cookies.txt של youtube.com ולסגור את החלון, להעלות כ-Secret File ברנדר ולהפעיל מחדש');
+      throw new Error('youtube cookies: ' + all);
+    }
+    throw new Error('youtube: ' + (all || 'no file'));
+  }
   return file;
 }
 async function prepareYoutube(item, d, dl, s) {
@@ -612,13 +653,13 @@ async function prepareYoutube(item, d, dl, s) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), name + '-'));
   try {
     const left = () => Math.max(5000, dl - Date.now());
-    const pr = makeProg(s, ''); // one progress for all of it: quarter, half, three quarters, and then the playback
+    const pr = makePctProg(s); // the caller hears how many percent were downloaded
     announce(s, 'מוריד קובץ מיוטיוב לשרת');
     const file = await ytDownload(item.url, dir, dl, s, pr);
     await voiceCheck(file, key, dl);
-    pr.set(YT_DL_SHARE);
-    await ffmpegRun(['-i', file, '-vn', '-t', String(MEDIA_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', path.join(dir, 'out.wav')], { timeout: left(), limit: MEDIA_MAX_SEC, prog: pr, from: YT_DL_SHARE, to: 95 });
-    pr.set(95);
+    announce(s, 'ההורדה הסתיימה. מחלץ אודיו');
+    await ffmpegRun(['-i', file, '-vn', '-t', String(MEDIA_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', path.join(dir, 'out.wav')], { timeout: left(), limit: MEDIA_MAX_SEC });
+    announce(s, 'מכין את הקובץ להשמעה');
     await upload(name, fs.readFileSync(path.join(dir, 'out.wav')), dl, d, 60000);
     mediaDone[key] = true;
     return { name };
@@ -666,6 +707,24 @@ function progSay(s, word, job, label) {
   const key = job ? 'j' + job.t : 'l' + (label || '');
   s.progQ = s.progQ.filter(x => x.key !== key);
   s.progQ.push({ key, text }); // said at the start of the next prompt of the caller (see dn)
+}
+// spoken percent of a download: "ירדו 30 אחוז" every DL_PCT_STEP percent (default 10; 25 gives 25, 50, 75). Only the latest percent is said when several are waiting
+const DL_PCT_STEP = Math.min(50, Math.max(5, parseInt(process.env.DL_PCT_STEP, 10) || 10));
+function makePctProg(s) {
+  return {
+    pct: 0, last: 0,
+    set(p) {
+      p = Math.min(99, Math.floor(Number(p) || 0));
+      if (!(p > this.pct)) return;
+      this.pct = p;
+      const step = Math.floor(p / DL_PCT_STEP) * DL_PCT_STEP;
+      if (step <= this.last || step <= 0) return;
+      this.last = step;
+      if (!PROG_SAY_ON || !s) return;
+      if (s.job) s.progPend = (s.progPend || []).filter(x => x.indexOf('ירדו') !== 0);
+      progSay(s, 'ירדו ' + step + ' אחוז');
+    }
+  };
 }
 // phases of a turn that the caller waits for (download of a file, extraction of the audio) report quarters too
 function makeProg(s, label) {
@@ -2223,6 +2282,8 @@ const PROBLEM_RULES = [
   [/(upload|download) failed.*(token|login|unauthorized|session|EXCEPTION)/i, '', () => 'הטוקן של ימות לא תקין או שפג'],
   [/download failed/, '', () => 'ההקלטה לא נמצאה בימות'],
   [/upload failed/, '', () => 'ההעלאה לימות נכשלה. בדוק את השלוחה ואת הטוקן'],
+  [/youtube cookies/, 'לא הצלחתי להוריד מיוטיוב', () => 'העוגיות של יוטיוב פגו או נחסמו. צריך לייצא עוגיות חדשות'],
+  [/youtube no cookies/, 'לא הצלחתי להוריד מיוטיוב', () => 'חסרות עוגיות של יוטיוב. צריך להעלות קובץ עוגיות'],
   [/Sign in to confirm|not a bot|--cookies|cookies/i, 'לא הצלחתי להוריד מיוטיוב', () => 'יוטיוב חוסם את השרת. צריך עוגיות חדשות'],
   [/too large|max-filesize/i, 'הקובץ גדול מדי', () => 'הקובץ גדול מדי. בדוק את המגבלות בהגדרות'],
   [/ffmpeg/i, '', () => 'ffmpeg לא זמין בשרת'],
