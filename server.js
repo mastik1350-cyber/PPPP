@@ -3209,7 +3209,7 @@ function statusMsg(s) {
     // the latest status is what is happening now, but quarters of progress that were not said yet are said before it
     const latest = s.say[s.say.length - 1];
     const pend = (s.progPend || []).filter(x => x !== latest);
-    msg = (pend.length ? pend.join('. ') + '. ' : '') + latest;
+    msg = sp((pend.length ? pend.join(' ') + ' ' : '') + latest); // no dot inside: in a Yemot read= a dot separates the messages, and a dot in a text breaks the command and drops the call
     s.say = []; s.progPend = []; s.lastSay = latest;
   }
   if (!msg) return '';
