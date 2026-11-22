@@ -91,6 +91,16 @@ let ymLockedUntil = 0;
 let ymLoginBusy = false;
 let ymLastRelogin = 0;
 const YM_LOCK_PAUSE_MS = 10 * 60 * 1000;
+let ymLockStrikes = 0;
+// every new lock doubles the pause (10, 20, 40 min ... max 2 h), so the bot does not keep knocking on a locked account
+function ymSetLocked(where) {
+  const pause = Math.min(YM_LOCK_PAUSE_MS * Math.pow(2, ymLockStrikes), 2 * 60 * 60 * 1000);
+  ymLockStrikes++;
+  ymLockedUntil = Date.now() + pause;
+  ymSession = '';
+  console.error('yemot: account locked (' + where + '), pausing yemot calls for ' + Math.round(pause / 60000) + ' min');
+  setTimeout(ymLogin, pause + 2000).unref(); // one single retry when the pause ends
+}
 const TOKEN = {
   toString() { return ymSession || 'pending-login'; },
   valueOf() { return ymSession || 'pending-login'; },
@@ -105,15 +115,15 @@ async function ymLogin() {
     const u = RAW_TOKEN.slice(0, i), pw = RAW_TOKEN.slice(i + 1);
     const r = await fetch(YM + 'Login?username=' + encodeURIComponent(u) + '&password=' + encodeURIComponent(pw), { signal: AbortSignal.timeout(10000) });
     const t = await r.text();
-    if (/account locked/i.test(t)) { ymLockedUntil = Date.now() + YM_LOCK_PAUSE_MS; console.error('yemot login: account locked, pausing yemot calls for 10 min'); problemLog('התחברות לימות', new Error('yemot login: account locked')); return; }
+    if (/account locked/i.test(t)) { ymSetLocked('login'); problemLog('התחברות לימות', new Error('yemot login: account locked')); return; }
     let j = {}; try { j = JSON.parse(t); } catch (e) {}
-    if (j.token) { ymSession = String(j.token); console.log('yemot login ok'); }
+    if (j.token) { ymSession = String(j.token); ymLockStrikes = 0; console.log('yemot login ok'); }
     else { console.error('yemot login failed:', t.slice(0, 200)); problemLog('התחברות לימות', new Error('yemot upload failed token login ' + t.slice(0, 100))); }
   } catch (e) { console.error('yemot login error:', e.message); problemLog('התחברות לימות', e); }
   finally { ymLoginBusy = false; }
 }
 setTimeout(ymLogin, 500).unref();
-setInterval(() => { ymSession = ''; ymLogin(); }, 20 * 60 * 1000).unref();
+setInterval(() => { ymLogin(); }, 20 * 60 * 1000).unref(); // the old session stays in use until a new one arrives
 const safeEq = (a, b) => {
   const x = Buffer.from(String(a)), y = Buffer.from(String(b));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
@@ -257,13 +267,14 @@ async function http(url, opt, ms, deadline) {
   if (left < 800) { const e = new Error('turn budget exhausted'); e.budget = true; throw e; }
   const isYm = typeof url === 'string' && url.startsWith(YM);
   if (isYm && Date.now() < ymLockedUntil) throw new Error('yemot paused: account locked');
+  if (isYm && !ymSession && RAW_TOKEN.indexOf(':') >= 0) { ymLogin(); throw new Error('yemot paused: not logged in yet'); } // never send the placeholder token to Yemot
   const r = await fetch(url, { ...opt, signal: AbortSignal.timeout(Math.min(ms, left)) });
   if (isYm) {
     const ct = r.headers.get('content-type') || '';
     if (/json|text/i.test(ct)) {
       try {
         const t = await r.clone().text();
-        if (/account locked/i.test(t)) { ymLockedUntil = Date.now() + YM_LOCK_PAUSE_MS; ymSession = ''; console.error('yemot: account locked, pausing yemot calls for 10 min'); }
+        if (/account locked/i.test(t)) { if (Date.now() >= ymLockedUntil) ymSetLocked('request'); }
         else if (/"responseStatus":"EXCEPTION"/.test(t) && /token/i.test(t) && Date.now() - ymLastRelogin > 60000) { ymLastRelogin = Date.now(); ymSession = ''; ymLogin(); }
       } catch (e) {}
     }
@@ -2739,7 +2750,7 @@ async function downloadText(name, deadline, d) {
 
 // cleanup is best effort and never blocks or fails a call
 function del(name, d) {
-  fetch(YM + 'FileAction?token=' + encodeURIComponent(TOKEN) + '&action=delete&what=' + encodeURIComponent(yp(name, d)), { signal: AbortSignal.timeout(8000) }).catch(() => {});
+  http(YM + 'FileAction?token=' + encodeURIComponent(TOKEN) + '&action=delete&what=' + encodeURIComponent(yp(name, d)), {}, 8000).catch(() => {});
 }
 
 app.get('/', (q, r) => { r.set('Access-Control-Allow-Origin', '*'); r.send('ok'); });
