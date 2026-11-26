@@ -1,0 +1,122 @@
+--- /home/claude/server.orig.js	2026-11-26 17:12:51.226913270 +0000
++++ server.js	2026-11-26 17:12:51.293072011 +0000
+@@ -5,9 +5,9 @@
+ //  השמעה  PLAYER=off מכבה את השליטה בהשמעה | PL_SEG_SEC (10) אורך קטע | PL_CHAIN (3) קטעים בכל בקשה | PL_SKIP_SEC (30) דילוג | PL_PAUSE_WAIT_SEC (30) | PL_PAUSE_MAX_MIN (3)
+ //         מקשים בזמן השמעה: 5 השהיה/המשך, 4 אחורה, 6 קדימה, 0 עצירה
+ //  שלב 2  SEARCH_SAY=off מכבה את ההודעה "מחפש ב..." | SEARCH_SAY_MAX (60) מקסימום תווים מוקראים מהשאילתה
+-//  שלב 3  הודעות שאינן מפריעות נאמרות פעם אחת לשיחה (s.noticed)
++//  שלב 3  הודעות שאינן מפריעות נאמרות פעם אחת בלבד (לא בכל תשובה) | ERR_REPEAT_HOURS (24) אחרי כמה שעות אותה הודעה תיאמר שוב, 0 = רק פעם אחת עד הפעלה מחדש של השרת
+ //  שלב 4  PREFS_SAVE=off מכבה שמירת קול/קצב/סגנון לפי מספר טלפון בין שיחות
+-//  שלב 5  PODCAST=off | PODCAST_VOICE_A (Puck) | PODCAST_VOICE_B (Kore) | PODCAST_MAX_WORDS (900) | PODCAST_WAIT_SEC (150) | PODCAST_CHUNK_CHARS (1400)
++//  שלב 5  PODCAST=off | PODCAST_VOICE_A (Puck) | PODCAST_VOICE_B (Kore) | PODCAST_MAX_WORDS (900) | PODCAST_WAIT_SEC (150) | PODCAST_CHUNK_CHARS (2000)
+ //  שלב 6  MUSIC_API_KEY (מפתח שירות המוזיקה) | MUSIC_PROVIDER (lyria) | MUSIC_MODEL (lyria-3.5) | MUSIC_CLIP_MODEL (lyria-3-clip-preview) | MUSIC_DAILY_MAX (5) | MUSIC=off
+ //  שלב 7  TITLES=off מכבה כותרות אוטומטיות | TITLE_AFTER (2) אחרי כמה סבבים נוצרת כותרת
+ //  שלב 8  SHEET_PROGRESS_COL (E) | SHEET_PROGRESS_SEC (6) | SHEET_PROGRESS_STEP (1) | PROG_SAY=off מכבה דיווח רבעים בקו
+@@ -602,7 +602,11 @@
+   execFileP(YTDLP, ['ytsearch1:niggun', '--simulate', '--no-warnings', '-f', 'bestaudio/best',
+     '--js-runtimes', 'node:' + process.execPath, '--remote-components', 'ejs:github', ...ytArgs()], { timeout: 120000 })
+     .then(() => console.log('youtube warm-up ok'))
+-    .catch(e => console.error('youtube warm-up failed:', (e.killed ? 'timed out; ' : '') + String(e.stderr || e.message).replace(/\s+/g, ' ').slice(-300)));
++    .catch(e => {
++      const msg = String(e.stderr || e.message).replace(/\s+/g, ' ').slice(-300);
++      console.error('youtube warm-up failed:', (e.killed ? 'timed out; ' : '') + msg);
++      if (/Sign in|not a bot|cookies|403|Forbidden/i.test(msg)) console.error('[שגיאת עוגיות] יוטיוב דחה את העוגיות (גם אם התוקף בקובץ עוד לא עבר). לייצא cookies.txt חדש: חלון גלישה בסתר, חשבון נפרד, להיכנס ליוטיוב, לפתוח youtube.com/robots.txt באותה לשונית, לייצא, לסגור את החלון, להחליף את ה-Secret File ברנדר ולהפעיל מחדש');
++    });
+ }, 3000).unref();
+ // downloads the audio of one video into dir and returns the file path
+ async function ytDownload(url, dir, dl, s, pr) {
+@@ -1908,7 +1912,7 @@
+ const POD_VOICE_B = VOICE_ID[String(process.env.PODCAST_VOICE_B || 'kore').toLowerCase()] || 'Kore';
+ const POD_MAX_WORDS = Math.min(2500, Math.max(200, parseInt(process.env.PODCAST_MAX_WORDS, 10) || 900));
+ const POD_WAIT_MS = Math.max(30, parseInt(process.env.PODCAST_WAIT_SEC, 10) || 150) * 1000;
+-const POD_CHUNK = Math.min(3000, Math.max(400, parseInt(process.env.PODCAST_CHUNK_CHARS, 10) || 1400));
++const POD_CHUNK = Math.min(3000, Math.max(400, parseInt(process.env.PODCAST_CHUNK_CHARS, 10) || 2000));
+ const POD_WORDS = { short: 300, medium: 600, long: 900 };
+ const PODCAST_DECL = {
+   name: 'create_podcast',
+@@ -1971,14 +1975,21 @@
+ async function podAudio(turns, deadline, onPct) {
+   const chunks = podChunks(turns);
+   let done = 0, multiOk = true;
+-  const model = TTS_LIST[0];
++  // the first voice model that is not out of quota; when one fails (quota, missing, overload) the next one is tried
++  const pickModel = () => TTS_LIST.find(m => (ttsDown[m] || 0) <= Date.now());
+   const one = async ch => {
+     let buf;
+-    if (multiOk) {
++    for (let at = 0; multiOk && !buf && at < TTS_LIST.length; at++) {
++      const model = pickModel();
++      if (!model) break;
+       try { buf = await podPiece(model, ch, deadline); }
+       catch (e) {
+         if (isBudget(e)) throw e;
+         if (e.status === 400) { multiOk = false; console.error('[podcast] multi-speaker not accepted by ' + model + ', producing turn by turn'); }
++        else if (e.status === 429 || e.status === 404 || e.status >= 500) {
++          ttsDown[model] = Date.now() + (e.status === 429 ? 600000 : e.status === 404 ? 86400000 : 120000);
++          console.error('[podcast] model ' + model + ' unavailable (' + e.status + '), trying the next one');
++        }
+         else throw e;
+       }
+     }
+@@ -2311,14 +2322,22 @@
+   if (!s.softQ) s.softQ = [];
+   if (!s.softQ.some(x => x.key === key)) s.softQ.push({ key, text });
+ }
+-// the spoken part (Yemot voice) that goes before the answer; only notices that were not said yet in this call
++// ERR_REPEAT_HOURS (default 24): the same notice is spoken ONCE, not at the start of every answer. 0 = once until the server restarts.
++const _erh = parseFloat(process.env.ERR_REPEAT_HOURS);
++const ERR_REPEAT_MS = (isNaN(_erh) || _erh < 0 ? 24 : _erh) * 3600000;
++const spokenAt = {};
++function sayOnce(key) {
++  const last = spokenAt[key];
++  if (last && (ERR_REPEAT_MS === 0 || Date.now() - last < ERR_REPEAT_MS)) return false;
++  spokenAt[key] = Date.now();
++  return true;
++}
++// the spoken part (Yemot voice) that goes before the answer; a notice that was already said is not said again (for any caller)
+ function softPre(s) {
+   if (!s || !s.softQ || !s.softQ.length) return '';
+   const q = s.softQ.splice(0);
+   if (!isAdmin(s)) return '';
+-  if (!s.noticed) s.noticed = {};
+-  const fresh = q.filter(x => !s.noticed[x.key]);
+-  fresh.forEach(x => { s.noticed[x.key] = 1; });
++  const fresh = q.filter(x => sayOnce('soft:' + x.key));
+   return fresh.length ? 't-' + sp(fresh.map(x => x.text).join('. ')) + '.' : '';
+ }
+ PROBLEM_RULES.unshift(
+@@ -2403,10 +2422,15 @@
+     if (p.status === 200) add(true, 'מודל ' + label + ' ' + m + ': קיים');
+     else if (p.status === 404) add(false, 'מודל ' + label + ' ' + m + ': לא קיים  ➜ ' + fix);
+     else if (p.status !== 0 && p.status !== 429) add(false, 'מודל ' + label + ' ' + m + ': לא ניתן לבדוק (תשובה ' + p.status + ')');
++    return p.status;
+   };
+   await model('טקסט', KEYS, TEXT_MODEL, 'לתקן את TEXT_MODEL');
+   if (TEXT_FALLBACK) await model('טקסט גיבוי', KEYS, TEXT_FALLBACK, 'לתקן את TEXT_MODEL_FALLBACK');
+-  for (const m of TTS_LIST) await model('קול', TTS_KEYS, m, 'להסיר מ-TTS_MODEL');
++  for (const m of [...TTS_LIST]) {
++    const st = await model('קול', TTS_KEYS, m, 'להסיר מ-TTS_MODEL');
++    // a voice model that does not exist is dropped automatically (as long as another one is left)
++    if (st === 404 && TTS_LIST.length > 1) { TTS_LIST.splice(TTS_LIST.indexOf(m), 1); console.log('[מפתחות] המודל ' + m + ' לא קיים והוסר אוטומטית מרשימת הקול. נשארו: ' + TTS_LIST.join(', ')); }
++  }
+   return res;
+ }
+ // missing settings that make a part of the system fail, written to the log in one place
+@@ -2733,7 +2757,7 @@
+     }
+     if (hasNext || last.status === 429) {
+       if (hasNext) softNote('tts-fallback', 'מודל הקול הראשי לא זמין, עברתי למודל גיבוי');
+-      ttsDown[model] = Date.now() + (last.status === 429 ? 600000 : 120000);
++      ttsDown[model] = Date.now() + (last.status === 429 ? 600000 : last.status === 404 ? 86400000 : 120000);
+       console.error('tts model', model, 'unavailable (' + String(last.message || '').slice(0, 60) + ')' + (hasNext ? ', using ' + TTS_LIST[mi + 1] : '') + (last.status === 404 ? '  ➜ המודל לא קיים: להסיר אותו מ-TTS_MODEL' : last.status === 429 ? '  ➜ חריגה ממכסה: מושבת ל-10 דקות' : ''));
+     }
+   }
+@@ -3343,7 +3367,7 @@
+     } catch (te) {
+       console.error(id, 'gemini voice unavailable, Yemot reads the answer:', String(te.message).slice(0, 80));
+       const vd = problemLog('הקול של ג׳מיני', te, s);
+-      if (isAdmin(s)) text = 'הקול של ג׳מיני לא זמין. ' + vd.admRaw + '. ' + text;
++      if (isAdmin(s) && sayOnce('tts:' + vd.admRaw)) text = 'הקול של ג׳מיני לא זמין. ' + vd.admRaw + '. ' + text;
+     }
+     const t3 = Date.now();
+     // a requested file is played right after the answer
