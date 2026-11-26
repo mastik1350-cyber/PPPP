@@ -134,7 +134,8 @@ const BUDGET = Number(process.env.TURN_BUDGET_MS) || 80000;
 const REC_MAX = String(parseInt(process.env.REC_MAX, 10) || 30);
 
 // Yemot cannot read these characters inside t- text, and , = break the read= syntax
-const sp = s => String(s).replace(/[.\-"'&|,=]/g, ' ').replace(/\s+/g, ' ').trim();
+// a geresh inside a word (ג'ויש) becomes the Hebrew geresh ׳ so the word stays whole; the other characters that Yemot uses as syntax become spaces
+const sp = s => String(s).replace(/(\p{L})['’‘`](?=\p{L})/gu, '$1׳').replace(/[.\-"'&|,=]/g, ' ').replace(/\s+/g, ' ').trim();
 
 // no character modes: plain Gemini (the mode setting is kept only for compatibility and has no effect)
 // the user can change the voice or pace by speaking; the model signals it with a tag that the server strips before read-aloud
@@ -241,7 +242,9 @@ function hint(msg) {
     [/Sign in to confirm|not a bot|cookies/i, 'יוטיוב חוסם את השרת: להגדיר YOUTUBE_COOKIES'],
     [/larger than max-filesize|max-filesize/i, 'הסרטון גדול מ-DRIVE_MAX_MB: להגדיל או להקטין את DRIVE_MAX_HEIGHT'],
     [/Requested format is not available/i, 'יוטיוב לא מציע את הפורמט: לעדכן yt-dlp (פריסה מחדש) או להקטין את DRIVE_MAX_HEIGHT'],
-    [/ffmpeg missing|ffmpeg/i, 'ffmpeg לא זמין: לבדוק שחבילת ffmpeg-static הותקנה'],
+    [/ffmpeg timed out/i, 'ההמרה של ffmpeg לקחה יותר מדי זמן: הקובץ ארוך או גדול או שהשרת חלש. להקטין את אורך הקובץ (DRIVE_PLAY_MAX_MIN, SONG_MAX_MIN) או להשתמש בשרת חזק יותר'],
+    [/ffmpeg exit \d+/i, 'ffmpeg נכשל בהמרת הקובץ: הקובץ פגום או בפורמט שלא נתמך (הפרטים בלוג)'],
+    [/ffmpeg missing|ENOENT.*ffmpeg|ffmpeg.*ENOENT/i, 'ffmpeg לא זמין: לבדוק שחבילת ffmpeg-static הותקנה'],
     [/timed out|timeout|AbortError/i, 'פג הזמן: להגדיל DRIVE_DL_MIN (הורדה) או לבדוק חיבור'],
     [/empty video file/, 'ההורדה הסתיימה בקובץ ריק'],
     [/extension does not exist/, 'השלוחה לא קיימת בימות: ליצור אותה, או להגדיר SONGS_EXT למספר שלוחה קיימת'],
@@ -841,6 +844,8 @@ let driveTok = { t: '', exp: 0 };
 let driveFolderCache = '';
 const driveJobs = [];
 let driveBusy = 0;
+// uploads that run at the same time (each one downloads and converts a video): 1 is safe for a small server; raise DRIVE_PARALLEL only when there is memory to spare
+const DRIVE_PARALLEL = Math.min(4, Math.max(1, parseInt(process.env.DRIVE_PARALLEL, 10) || 1));
 async function driveToken() {
   if (driveTok.t && Date.now() < driveTok.exp - 60000) return driveTok.t;
   const r = await fetch(DRIVE_OAUTH, {
@@ -978,7 +983,7 @@ function startDrive(s, n) {
   const item = n ? ((s && s.found) || [])[Number(n) - 1] : (s && s.lastItem);
   if (!item) { console.error('[drive] refused: ' + (n ? 'no result number ' + n + ' in the last search' : 'no item was played yet in this call')); return { error: n ? 'no such result' : 'no item was played yet: ask the user which one to save' }; }
   if (item.src !== 'youtube') { console.error('[drive] refused: the item is not from YouTube (' + item.src + ')'); return { error: 'only YouTube videos can be saved to Drive' }; }
-  if (driveBusy >= 2) { console.error('[drive] refused: two uploads are already running'); return { error: 'two uploads are already running, try again in a few minutes' }; }
+  if (driveBusy >= DRIVE_PARALLEL) { console.error('[drive] refused: ' + DRIVE_PARALLEL + ' upload(s) already running'); return { error: 'an upload is already running, try again in a few minutes' }; }
   const job = newJob(item.title, s);
   driveJobs.unshift(job);
   driveJobs.length = Math.min(driveJobs.length, 10);
@@ -1032,6 +1037,9 @@ function driveStatus() {
 // To try a failed row again, clear its D cell.
 const SHEET_ID = String(process.env.SHEET_ID || '').trim();
 const SHEET_TAB_ENV = String(process.env.SHEET_TAB || '').trim();
+// a row that was cut in the middle by a server restart is started again at most SHEET_MAX_TRIES times in total, then marked as failed (breaks restart loops)
+const SHEET_MAX_TRIES = Math.max(1, parseInt(process.env.SHEET_MAX_TRIES, 10) || 2);
+const triesOf = x => { const m = /(?:🔁|ניסיון)\s*(\d+)/.exec(String(x || '')); return m ? parseInt(m[1], 10) : 0; };
 const SHEET_POLL_MS = Math.max(10, parseInt(process.env.SHEET_POLL_SEC, 10) || 30) * 1000;
 const SHEETS_API = process.env.SHEETS_API_URL || 'https://sheets.googleapis.com/v4/spreadsheets/';
 const HAS_SHEET = HAS_DRIVE && !!SHEET_ID;
@@ -1101,7 +1109,8 @@ async function sheetSetup() {
   }
 }
 // one row: download, upload, then write the Drive link (or the failure) back to the sheet
-async function sheetRun(url, row) {
+async function sheetRun(url, row, tries) {
+  const tag = tries ? ' (ניסיון ' + (tries + 1) + ')' : '';
   const id = (/(?:v=|youtu\.be\/|shorts\/|embed\/)([\w-]{11})/.exec(url) || [])[1] || '';
   let title = '';
   try {
@@ -1120,7 +1129,7 @@ async function sheetRun(url, row) {
       else console.error('[sheet] הקישור לא נמצא יותר בגיליון (נמחק או שונה): ' + url);
     } catch (e) { console.error('[sheet] כתיבה לגיליון נכשלה: ' + withHint(String(e.message))); }
   }));
-  put(['', '⏳ מוריד']);
+  put(['', '⏳ מוריד' + tag]);
   // percent of the video in column PROG_COL: written when it moved PROG_STEP points and PROG_SEC seconds passed (the quota of Sheets), and always at the end
   let lastW = 0, lastT = 0, pend = false;
   const wProg = val => (chain = chain.then(async () => {
@@ -1132,7 +1141,7 @@ async function sheetRun(url, row) {
     if (job.state === 'running' && !pend && job.pct - lastW >= PROG_STEP && Date.now() - lastT >= PROG_SEC) { lastW = job.pct; lastT = Date.now(); pend = true; wProg(job.pct + '%').then(() => { pend = false; }); }
   }, 1000);
   let shown = 'download';
-  const iv = setInterval(() => { if (job.state === 'running' && job.step !== shown) { shown = job.step; put(['', '⏳ מעלה']); } }, 10000);
+  const iv = setInterval(() => { if (job.state === 'running' && job.step !== shown) { shown = job.step; put(['', '⏳ מעלה' + tag]); } }, 10000);
   try { await saveToDrive({ title, url, src: 'youtube' }, job); }
   catch (e) { job.state = 'failed'; job.error = String(e.message).slice(0, 200); console.error('drive upload failed:', withHint(job.error)); }
   finally { clearInterval(iv); clearInterval(ivp); }
@@ -1150,12 +1159,13 @@ async function sheetPoll() {
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i] || [];
       const url = cell(r[0]);
-      if (!url || !isApproved(r[1]) || cell(r[2]) || cell(r[3]) || sheetBusy.has(url)) continue;
+      if (!url || !isApproved(r[1]) || cell(r[2]) || (cell(r[3]) && !cell(r[3]).startsWith('🔁')) || sheetBusy.has(url)) continue;
+      const tries = triesOf(cell(r[3]));
       const row = i + 2;
       if (!isYtUrl(url)) { await sheetPut(row, ['', '❌ זה לא קישור יוטיוב']); continue; }
-      if (driveBusy >= 2) break; // the rest wait for the next round
+      if (driveBusy >= DRIVE_PARALLEL) break; // the rest wait for the next round
       driveBusy++; sheetBusy.add(url);
-      sheetRun(url, row)
+      sheetRun(url, row, tries)
         .catch(e => console.error('[sheet] שגיאה בשורה ' + row + ': ' + withHint(String(e && e.message))))
         .finally(() => { driveBusy--; sheetBusy.delete(url); });
     }
@@ -1172,7 +1182,14 @@ async function sheetStart() {
     let reset = 0;
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i] || [];
-      if (cell(r[3]).startsWith('⏳') && !cell(r[2])) { await sheetPut(i + 2, ['', '']); sheetPutProg(i + 2, '').catch(() => {}); reset++; }
+      if (cell(r[3]).startsWith('⏳') && !cell(r[2])) {
+        const done = Math.max(1, triesOf(cell(r[3]))); // how many times this row was already started (no counter in the status = the first run)
+        if (done >= SHEET_MAX_TRIES) {
+          await sheetPut(i + 2, ['', '❌ נכשל: השרת נעצר באמצע ההעלאה ' + done + ' פעמים (כנראה חוסר זיכרון או דיסק מלא). לנסות סרטון קצר יותר או DRIVE_MAX_HEIGHT נמוך, ולמחוק את הסטטוס כדי לנסות שוב']);
+          sheetPutProg(i + 2, 'נכשל').catch(() => {});
+          console.error('[sheet] שורה ' + (i + 2) + ' נעצרה באמצע ' + done + ' פעמים ולכן סומנה כנכשלה (SHEET_MAX_TRIES=' + SHEET_MAX_TRIES + ')');
+        } else { await sheetPut(i + 2, ['', '🔁' + done]); sheetPutProg(i + 2, '').catch(() => {}); reset++; }
+      }
     }
     console.log('[sheet] מחובר לגיליון, לשונית "' + sheetTab + '", בדיקה כל ' + Math.round(SHEET_POLL_MS / 1000) + ' שניות' + (reset ? ', ' + reset + ' שורות שנקטעו יתחילו מחדש' : ''));
   } catch (e) {
@@ -1474,6 +1491,10 @@ async function gmailHeaders(id, deadline) {
 async function resolveContact(name, deadline) {
   const key = String(name).trim().toLowerCase();
   if (MAIL_CONTACTS[key]) return { address: MAIL_CONTACTS[key] };
+  // the Google Contacts of the user (when the token has the contacts scope): one address = used, several = the caller chooses
+  const gc = [...new Map((await GX.contactEmails(name, deadline)).map(x => [x.address.toLowerCase(), x])).values()];
+  if (gc.length === 1) return { address: gc[0].address };
+  if (gc.length > 1) return { choices: gc.slice(0, 4).map((x, i) => ({ number: i + 1, untrusted_name: String(x.name).slice(0, 40), address: x.address })), note: 'several people match: read the choices and ask which one, then call mail_draft again with the chosen address' };
   const nm = String(name).replace(/["()\\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
   if (!nm) return { error: 'no address found: ask the user to spell the email address' };
   const ids = ((await gJson('gmail search', GMAIL_API + 'messages?maxResults=10&q=' + encodeURIComponent('from:(' + nm + ') OR to:(' + nm + ')'), deadline)).messages || []).map(m => m.id);
@@ -1848,7 +1869,7 @@ const GMAIL_OPS = [
 function speakQuery(q, gmail) {
   let t = String(q || '');
   if (gmail) for (const [re, to] of GMAIL_OPS) t = t.replace(re, to);
-  t = t.replace(/https?:\/\/\S+/g, ' ').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+  t = t.replace(/https?:\/\/\S+/g, ' ').replace(/(\p{L})['’‘`׳](?=\p{L})/gu, '$1׳').replace(/[^\p{L}\p{N}\s׳]/gu, ' ').replace(/\s+/g, ' ').trim();
   if (t.length > SEARCH_SAY_MAX) { t = t.slice(0, SEARCH_SAY_MAX); const i = t.lastIndexOf(' '); if (i > 15) t = t.slice(0, i); }
   return t;
 }
@@ -1906,6 +1927,11 @@ Object.assign(PERSONAL_STATUS, {
   confirm_action: 'מבצע'
 });
 const PERSONAL_HINT2 = ' כלים נוספים: gmail_modify לשינוי מייל מהרשימה (סימון כנקרא או כלא נקרא, ארכיון, כוכב, ספאם, תוויות, ובשדה thread=true לכל השרשור), gmail_labels להצגת התוויות, gmail_summarize לסיכום מייל, שרשור או המיילים האחרונים ברשימה, gmail_delete להעברת מייל לפח, mail_forward להעברת מייל לנמען (מכין טיוטה כמו mail_draft ונשלח רק באמצעות mail_send אחרי אישור), mail_save_draft לשמירת הטיוטה האחרונה בטיוטות של ג׳ימייל בלי לשלוח, gmail_attachment_play להשמעת קובץ שמע או וידאו שמצורף למייל, drive_create ליצירת תיקייה, מסמך, גיליון או קובץ טקסט, drive_rename לשינוי שם, drive_move להעברה לתיקייה, drive_delete להעברה לפח, drive_share לשיתוף עם כתובת מייל או איש קשר, drive_save_attachment לשמירת קובץ מצורף בדרייב. לחיפוש תיקיות הפעל drive_search עם kind=folder, ולחיפוש בתוך תיקייה העבר את מספרה בשדה parent. מחיקה ושיתוף הם פעולות רגישות: הכלי מחזיר confirmation_required. אמור למשתמש במשפט אחד מה יבוצע ושאל אם לאשר, והפעל את confirm_action רק בתשובה הבאה של המשתמש ורק אחרי שאמר במפורש כן או אישר. אם כלי מחזיר tell_user, אמור זאת למשתמש בקצרה.';
+// ---- extra Google services (chat, calendar, contacts, tasks, docs, sheets): see google-extra.js ----
+const GX = require('./google-extra.js')({ gJson, gJsonReq, askConfirm, needScope, cleanLine, EMAIL_RE, resolveContact, ftype, driveApi: DRIVE_API });
+PERSONAL_DECLS.push(...GX.decls);
+GX.names.forEach(n => PERSONAL_NAMES.add(n));
+Object.assign(PERSONAL_STATUS, GX.status);
 // ---- stage 5: a podcast between two people (script by Gemini text model, voices by Gemini multi-speaker TTS) ----
 const HAS_PODCAST = String(process.env.PODCAST || '').trim().toLowerCase() !== 'off' && KEYS.length > 0 && TTS_KEYS.length > 0;
 const POD_VOICE_A = VOICE_ID[String(process.env.PODCAST_VOICE_A || 'puck').toLowerCase()] || 'Puck';
@@ -2073,7 +2099,7 @@ async function keepGenerated(s, wavOrMp3, title, isMp3) {
 function saveGeneratedToDrive(s) {
   if (!HAS_DRIVE) return { error: 'google drive is not configured', tell_user: 'הדרייב לא מוגדר בשרת' };
   if (!s.lastGen || !fs.existsSync(s.lastGen.file)) return { error: 'nothing to save', tell_user: 'אין עכשיו פודקאסט או שיר לשמירה' };
-  if (driveBusy >= 2) return { error: 'two uploads are already running, try again in a few minutes' };
+  if (driveBusy >= DRIVE_PARALLEL) return { error: 'an upload is already running, try again in a few minutes' };
   const g = s.lastGen;
   const job = newJob(g.title, s);
   job.step = 'upload';
@@ -2199,6 +2225,7 @@ async function personalCall(name, args, s, deadline) {
       case 'drive_share': return await driveShareTool(s, args, deadline);
       case 'drive_save_attachment': return await driveSaveAttachmentTool(s, args, deadline);
       case 'confirm_action': return args.confirmed_by_user === true ? await confirmActionTool(s, args, deadline) : { error: 'the user did not confirm' };
+      default: if (GX.names.has(name)) return await GX.call(name, s, args, deadline);
 
     }
     return { error: 'unknown tool' };
@@ -2235,6 +2262,11 @@ async function personalStartupCheck() {
     if (!have.includes(A + 'spreadsheets')) miss.push('spreadsheets');
     if (miss.length) console.error('[diag] אישי: בטוקן חסרות הרשאות: ' + miss.join(', ') + '  ➜ להפיק Refresh Token חדש ב-OAuth Playground עם ההרשאות האלה, ולהפעיל Gmail API. הכלים שהרשאתם חסרה יכבו ויגידו זאת בקול');
     else console.log('[diag] אישי: ההרשאות של הטוקן מספיקות (ג׳ימייל, דרייב ושיטס)');
+    if (GX.enabled) {
+      const opt = [['calendar', ['calendar', 'calendar.events']], ['contacts.readonly', ['contacts.readonly', 'contacts']], ['tasks', ['tasks']], ['documents', ['documents', 'drive']], ['chat.messages + chat.spaces.readonly', ['chat.messages', 'chat.messages.readonly']]];
+      const off = opt.filter(([, any]) => !any.some(x => have.includes(A + x))).map(([n]) => n);
+      console.log('[diag] שירותי גוגל נוספים: ' + (off.length ? 'חסרות הרשאות (הכלים האלה כבויים עד שיתווספו): ' + off.join(', ') : 'כל ההרשאות קיימות'));
+    }
   } catch (e) { console.error('[diag] אישי: בדיקת ההרשאות נכשלה: ' + withHint(String(e.message))); }
 }
 
@@ -2297,6 +2329,8 @@ const PROBLEM_RULES = [
   [/youtube no cookies/, 'לא הצלחתי להוריד מיוטיוב', () => 'חסרות עוגיות של יוטיוב. צריך להעלות קובץ עוגיות'],
   [/Sign in to confirm|not a bot|--cookies|cookies/i, 'לא הצלחתי להוריד מיוטיוב', () => 'יוטיוב חוסם את השרת. צריך עוגיות חדשות'],
   [/too large|max-filesize/i, 'הקובץ גדול מדי', () => 'הקובץ גדול מדי. בדוק את המגבלות בהגדרות'],
+  [/ffmpeg timed out/i, 'ההמרה לקחה יותר מדי זמן', () => 'ההמרה של האודיו לקחה יותר מדי זמן. הקובץ ארוך או גדול או שהשרת חלש'],
+  [/ffmpeg exit \d+/i, 'לא הצלחתי להמיר את הקובץ', () => 'ffmpeg נכשל בהמרה. הקובץ פגום או לא נתמך'],
   [/ffmpeg/i, '', () => 'ffmpeg לא זמין בשרת'],
   [/youtube/i, 'לא הצלחתי להוריד מיוטיוב', () => 'ההורדה מיוטיוב נכשלה'],
   [/Gmail API has not been used|Sheets API|Drive API has not been used|SERVICE_DISABLED/i, '', () => 'ה-API של גוגל לא מופעל בפרויקט'],
@@ -2557,7 +2591,7 @@ async function takeMedia(s) {
 // asks the model; when it calls a tool (web_search or play_media) the tool is run and the result is sent back, up to 3 rounds
 async function askModel(sys, contents, deadline, s) {
   const personal = !!(s && s.auth && HAS_PERSONAL);
-  const base = { systemInstruction: { parts: [{ text: (personal ? sys + PERSONAL_HINT + PERSONAL_HINT2 : sys) + (isAdmin(s) ? ADMIN_HINT : '') + (HAS_PODCAST ? PODCAST_HINT : '') + (MUSIC_ON ? SONG_HINT : '') + (HAS_DRIVE ? DRIVE_PROG_HINT : '') }] } };
+  const base = { systemInstruction: { parts: [{ text: (personal ? sys + PERSONAL_HINT + PERSONAL_HINT2 + GX.hint() : sys) + (isAdmin(s) ? ADMIN_HINT : '') + (HAS_PODCAST ? PODCAST_HINT : '') + (MUSIC_ON ? SONG_HINT : '') + (HAS_DRIVE ? DRIVE_PROG_HINT : '') }] } };
   const decls = [];
   if (HAS_SEARCH) decls.push(SEARCH_DECL);
   if (HAS_FOUND) decls.push(FOUND_SEARCH_DECL, FOUND_PLAY_DECL);
@@ -3645,9 +3679,15 @@ const enc = encodeURIComponent;
 let songCache = { t: 0, tracks: new Map() };
 
 // reads the songs folder: the pieces grouped by song, and the files that were dropped there and still have to be cut
+let songsMissingUntil = 0;
 async function songList(deadline) {
+  if (songsMissingUntil > Date.now()) { const q = new Error('songs folder missing (checked recently)'); q.quiet = true; throw q; }
   const r = await http(YM + 'GetIVR2Dir?token=' + enc(TOKEN) + '&path=' + enc('ivr2:' + SD), {}, 10000, deadline);
   const j = await r.json().catch(() => ({}));
+  if (j.responseStatus !== 'OK' && !process.env.SONGS_EXT && /extension does not exist/.test(JSON.stringify(j))) {
+    songsMissingUntil = Date.now() + 1800000; // the default folder was never created: ask again in 30 minutes, not on every request
+    console.error('[שירים] השלוחה ' + SD + ' לא קיימת בימות, ולכן שירי ההמתנה כבויים. ליצור אותה, או להגדיר SONGS_EXT לשלוחה קיימת (בדיקה חוזרת בעוד 30 דקות)');
+  }
   if (j.responseStatus !== 'OK') throw new Error('songs list failed (נתיב ' + SD + ') ' + JSON.stringify(j).slice(0, 120) + (/extension does not exist/.test(JSON.stringify(j)) ? '  ➜ ' + hint('extension does not exist') + (process.env.SONGS_EXT ? '' : ' (SONGS_EXT לא מוגדר, נבחר ברירת מחדל ' + SD + ')') : ''));
   const txt = JSON.stringify(j);
   const tracks = new Map();
@@ -3668,7 +3708,7 @@ async function songsFor(ph) {
   const now = Date.now();
   if (now - songCache.t > 120000) {
     try { songCache = { t: now, tracks: (await songList(now + 8000)).tracks }; }
-    catch (e) { console.error(String(e.message).slice(0, 400)); songCache.t = now - 90000; }
+    catch (e) { if (!e.quiet) console.error(String(e.message).slice(0, 400)); songCache.t = now - 90000; }
   }
   const all = [...songCache.tracks.values()];
   const mine = ph ? all.filter(t => t.owner === ph) : [];
@@ -3732,7 +3772,7 @@ async function scanRaw() {
       }
     }
   } catch (e) {
-    console.error('songs scan failed:', String(e.message).slice(0, 400));
+    if (!e.quiet) console.error('songs scan failed:', String(e.message).slice(0, 400));
   } finally {
     scanning = false;
   }

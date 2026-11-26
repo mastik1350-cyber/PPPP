@@ -175,4 +175,40 @@ api_link=https://<השירות שלך>.onrender.com/yemot
 | `/songs` | דף הוספה וניהול של שירי ההמתנה (רק כש-`SONGS_EXT` מוגדר) |
 | `/selftest` | בדיקה מלאה של כל החיבורים (לא חובה) |
 
+## שירותי גוגל בקול (ג׳ימייל, דרייב, צ׳אט, יומן ועוד)
+
+אחרי הקשת קוד אישי בטלפון (`PERSONAL_PIN`, ורק ממספרים שמופיעים ב-`PERSONAL_PHONES`) אפשר לעבוד עם החשבון של גוגל בקול:
+
+| שירות | מה אפשר |
+| --- | --- |
+| ג׳ימייל | חיפוש, הקראה, סיכום, מענה, שליחה, העברה, טיוטות, תוויות, פח, השמעת קבצים מצורפים |
+| דרייב | חיפוש, הקראה וסיכום, השמעת שמע ווידאו, יצירה, שינוי שם, העברה, מחיקה, שיתוף |
+| צ׳אט של גוגל | רשימת שיחות, הקראת הודעות, שליחת הודעה (חשבון Google Workspace בלבד) |
+| יומן | הצגת אירועים, יצירת אירוע עם הזמנות, מחיקה |
+| אנשי קשר | חיפוש מספר וכתובת מייל. השמות גם משמשים לשליחת מייל והזמנות |
+| משימות | הצגה, הוספה, סימון כבוצעה |
+| מסמכים וגיליונות | הוספת טקסט בסוף מסמך, קריאת תאים, הוספת שורה |
+
+**בטיחות:** כל פעולה שכותבת, שולחת או מוחקת (מייל, הודעת צ׳אט, אירוע, כתיבה במסמך או בגיליון, מחיקה ושיתוף) מוקראת ודורשת אישור בקול בתור הבא. טקסט שמגיע מגוגל (הודעות, מיילים, שמות אירועים) נחשב מידע בלבד והמודל לא מבצע הוראות שנמצאות בו.
+
+### הרשאות (scopes) ל-Refresh Token
+
+ב-OAuth Playground (או בכל כלי אחר) מפיקים Refresh Token חדש עם ההרשאות האלה:
+
+```
+https://www.googleapis.com/auth/gmail.modify
+https://www.googleapis.com/auth/drive
+https://www.googleapis.com/auth/spreadsheets
+https://www.googleapis.com/auth/calendar
+https://www.googleapis.com/auth/contacts.readonly
+https://www.googleapis.com/auth/tasks
+https://www.googleapis.com/auth/documents
+https://www.googleapis.com/auth/chat.spaces.readonly
+https://www.googleapis.com/auth/chat.messages
+```
+
+ובפרויקט בגוגל קלאוד מפעילים את ה-APIs: Gmail, Drive, Sheets, Google Calendar, People, Tasks, Google Docs ו-Google Chat. הרשאה שחסרה לא שוברת כלום: הכלי הזה כבוי והמערכת אומרת בקול מה חסר, ובלוג בהפעלה מופיעה שורה `שירותי גוגל נוספים` עם הרשימה.
+
+הערות: הצ׳אט של גוגל עובד דרך ה-API רק בחשבון Google Workspace. ל-Keep, Photos ו-Meet אין API לחשבון רגיל, ולכן הם לא נתמכים.
+
 </div>
