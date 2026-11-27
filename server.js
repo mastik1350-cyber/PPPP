@@ -1430,6 +1430,7 @@ function drivePlayTool(s, args) {
   if (!f) return { error: 'no such file: search first' };
   const t = ftype(f.mimeType);
   if (t !== 'audio' && t !== 'video') return { error: 'only audio and video files can be played' };
+  s.mediaNote = { kind: 'קובץ מהדרייב', title: f.name || f.title || '' };
   s.mediaJob = true;
   s.lastItem = null; // so the question "upload to Drive" is not asked after a file that already is in the Drive
   s.mediaP = prepareDriveFile(f, s.d, 0, s).catch(e => { console.error('media failed:', withHint(String(e.message).slice(0, 150))); return { error: e.message }; });
@@ -1749,6 +1750,7 @@ function gmailAttachmentPlayTool(s, args) {
   if (!m0 || !a) return { error: 'no such attachment: read the mail first' };
   const t = ftype(mimeOf(a.type, a.name));
   if (t !== 'audio' && t !== 'video') return { error: 'only audio and video attachments can be played' };
+  s.mediaNote = { kind: 'קובץ מצורף במייל', title: a.name || '' };
   s.mediaJob = true;
   s.lastItem = null;
   s.mediaP = prepareAttachment(m0, a, s.d, 0, s).catch(e => { console.error('media failed:', withHint(String(e.message).slice(0, 150))); return { error: e.message }; });
@@ -2054,23 +2056,26 @@ async function makePodcast(s, args) {
   const dl = Date.now() + POD_WAIT_MS * 3;
   announce(s, 'מכין את הפודקאסט');
   const turns = await podScript(args.topic, String(args.length || 'medium').toLowerCase(), String(args.style || '').slice(0, 80), dl);
+  const podText = turns.map(t => (t.sp === 'A' ? 'דן' : 'נועה') + ': ' + t.text).join('\n').slice(0, 6000);
+  s.podText = podText;
   announce(s, 'מקליט את הדוברים');
   const pr = makeProg(s, 'הקלטה');
   const a = await podAudio(turns, dl, f => pr.set(f * 100));
   await keepGenerated(s, a.wavFull, shortName(args.topic) + ' פודקאסט');
-  return { wav: a.wav8, title: shortName(args.topic) };
+  return { wav: a.wav8, title: shortName(args.topic), text: podText };
 }
 // the podcast is prepared while the model writes its short answer; a long one goes on in the background and is played when ready
 function startPodcast(s, args) {
   if (!HAS_PODCAST) return { error: 'podcast unavailable', tell_user: 'הפודקאסט לא מופעל בשרת' };
   const topic = String(args.topic || '').trim();
   if (!topic) return { error: 'missing topic' };
+  s.mediaNote = { kind: 'פודקאסט', title: topic.slice(0, 100) };
   s.mediaJob = true;
   s.lastItem = null;
   const job = makePodcast(s, args);
   s.mediaP = Promise.race([job, sleep(POD_WAIT_MS).then(() => ({ late: true }))]).then(r => {
     if (r && r.late) {
-      job.then(x => { s.podReady = x; }).catch(e => problemLog('פודקאסט ברקע', e, s));
+      job.then(x => { x.note = { kind: 'פודקאסט', title: topic.slice(0, 100) }; s.podReady = x; }).catch(e => problemLog('פודקאסט ברקע', e, s));
       return r;
     }
     return r;
@@ -2081,6 +2086,7 @@ function startPodcast(s, args) {
 function podReadyStep(s) {
   const r = s.podReady;
   s.podReady = null;
+  if (r && r.note) s.save = { qt: 'פודקאסט שהוכן ברקע', at: 'הושמע בקו: ' + r.note.kind + (r.note.title ? ' - ' + r.note.title : '') + (r.text ? '\nתמליל הפודקאסט:\n' + r.text : '') };
   startPlayer(s, r);
   return playerFirst(s, 't-' + sp('הפודקאסט מוכן'));
 }
@@ -2193,6 +2199,7 @@ function startSong(s, args) {
   if (!MUSIC_ON) return { error: 'song generation is off', tell_user: 'יצירת שירים כבויה בשרת' };
   if (!MUSIC_KEY) return { error: 'music key missing', tell_user: 'חסר מפתח ליצירת שירים. צריך להגדיר MUSIC_API_KEY בהגדרות של השרת. שים לב שאין מסלול חינמי ל-API של ליריה' };
   if (!String(args.topic || '').trim()) return { error: 'missing topic' };
+  s.mediaNote = { kind: 'שיר שנוצר', title: String(args.topic || '').slice(0, 100) };
   s.mediaJob = true;
   s.lastItem = null;
   s.mediaP = makeSong(s, args).catch(e => { console.error('song failed:', withHint(String(e.message).slice(0, 150))); return { error: 'music ' + (/music (daily limit|key missing|blocked)/.test(e.message) ? e.message : (e.status || '') + ' ' + e.message) }; });
@@ -2561,6 +2568,7 @@ async function prepareFound(item, d, s) {
 function startFound(s, n) {
   const item = ((s && s.found) || [])[Number(n) - 1];
   if (!item) return { error: 'no such result' };
+  s.mediaNote = { kind: item.src === 'youtube' ? 'סרטון מיוטיוב' : 'קובץ מהרשת', title: String(item.title || '').slice(0, 120) };
   s.mediaJob = true;
   s.lastItem = item;
   s.mediaP = prepareFound(item, s.d, s).catch(e => { console.error('media failed:', String(e.message).slice(0, 150)); return { error: e.message }; });
@@ -2571,6 +2579,7 @@ function startFound(s, n) {
 function startMedia(s, idx) {
   const m = MEDIA[Number(idx) - 1];
   if (!m || !s) return { error: 'no such file' };
+  s.mediaNote = { kind: 'קובץ', title: String(m.n || '') };
   s.mediaP = prepareMedia(m, s.d, 0, s).catch(e => { console.error('media failed:', String(e.message).slice(0, 150)); return { error: e.message }; });
   return { status: 'the file will be played right after your reply', file: m.n };
 }
@@ -3307,7 +3316,14 @@ function playPick(s, id, n) {
   armStatus(s);
   s.holdP = songsFor(s.ph).catch(() => []);
   startFound(s, n);
-  s.job = takeMedia(s).then(m => ansFor(s, 't-' + sp('משמיע את ' + item.title) + '.' + m + drivePrompt(s, m)))
+  s.job = takeMedia(s).then(m => {
+    if (m === 'PLAYER' || /^f-/.test(String(m))) {
+      const kind = item.src === 'youtube' ? 'סרטון מיוטיוב' : 'קובץ מהרשת';
+      s.save = { qt: 'בחירה מרשימת התוצאות: ' + String(item.title || '').slice(0, 120), at: 'הושמע בקו: ' + kind + ' - ' + String(item.title || '').slice(0, 120) };
+    }
+    s.mediaNote = null;
+    return ansFor(s, 't-' + sp('משמיע את ' + item.title) + '.' + m + drivePrompt(s, m));
+  })
     .catch(e => { console.error(id, 'pick failed', e && e.message); const d = problemLog('השמעת שיר', e, s); return ansFor(s, 't-' + sp('לא הצלחתי להשמיע את השיר' + (isAdmin(s) ? ' ' + d.admRaw : ''))); });
   return holdStep(s, id);
 }
@@ -3326,7 +3342,7 @@ async function holdStep(s, id) {
     if (r !== null) { s.job = null; s.say = []; return r; }
     const st = statusMsg(s);
     if (st) return st;
-    if (Date.now() - s.jobT0 > BUDGET + 15000 + (s.mediaJob ? 90000 : 0)) { s.job = null; return tapAny(s, 't-' + problemSay(s, Object.assign(new Error('turn budget exhausted'), { budget: true }), 'התשובה לא הייתה מוכנה בזמן')); }
+    if (!s.mediaJob && Date.now() - s.jobT0 > BUDGET + 15000) { s.job = null; return tapAny(s, 't-' + problemSay(s, Object.assign(new Error('turn budget exhausted'), { budget: true }), 'התשובה לא הייתה מוכנה בזמן')); }
     // still not ready: a short spoken message every WAIT_REPEAT_MS instead of silence
     s.hn++;
     return 'read=t-' + WAIT_AGAIN + '=H' + s.e + s.hn + ',no,1,1,1' + TAP_EMPTY;
@@ -3334,7 +3350,7 @@ async function holdStep(s, id) {
   const r = await Promise.race([s.job, sleep(HOLD_LAG_MS).then(() => null)]);
   if (r !== null) { s.job = null; s.say = []; return r; }
   { const st = statusMsg(s); if (st) return st; }
-  if (Date.now() - s.jobT0 > BUDGET + 15000 + (s.mediaJob ? 90000 : 0)) { s.job = null; return tapAny(s, 't-' + problemSay(s, Object.assign(new Error('turn budget exhausted'), { budget: true }), 'התשובה לא הייתה מוכנה בזמן')); }
+  if (!s.mediaJob && Date.now() - s.jobT0 > BUDGET + 15000) { s.job = null; return tapAny(s, 't-' + problemSay(s, Object.assign(new Error('turn budget exhausted'), { budget: true }), 'התשובה לא הייתה מוכנה בזמן')); }
   // the music continues where it stopped the last time (an answer or a song cut it), for the whole call
   if (!s.hold || s.hold.n !== files.length) s.hold = { i: 0, n: files.length };
   const msgs = [];
@@ -3395,7 +3411,8 @@ async function doTurn(s, q, id, T0, typed) {
     const histQ = { role: 'user', parts: [{ text: qtext || '[שאלה קולית]' }] };
     // the history keeps text only (question and answer), read back later by the Yemot voice
     s.save = { qt: qtext || 'לא תומללה', at: text };
-    if (s.personalTurn) { s.save = null; s.personalTurn = false; } // mails and files are not kept in the history
+    // everything that was said on the line is kept in the history; HIST_SKIP_PERSONAL=on brings back the old rule (mail and Drive turns are not saved)
+    if (s.personalTurn) { if (String(process.env.HIST_SKIP_PERSONAL || '').trim().toLowerCase() === 'on') s.save = null; s.personalTurn = false; }
     if (s.save) { if (!s.tbuf) s.tbuf = []; s.tbuf.push({ qt: s.save.qt, at: s.save.at }); if (s.tbuf.length > 6) s.tbuf.shift(); }
     const t2 = Date.now();
 
@@ -3410,6 +3427,10 @@ async function doTurn(s, q, id, T0, typed) {
     const t3 = Date.now();
     // a requested file is played right after the answer
     const media = await takeMedia(s);
+    if (s.save && s.mediaNote && (media === 'PLAYER' || /^f-/.test(String(media)))) {
+      s.save.at += '\nהושמע בקו: ' + s.mediaNote.kind + (s.mediaNote.title ? ' - ' + s.mediaNote.title : '') + (s.podText ? '\nתמליל הפודקאסט:\n' + s.podText : '');
+    }
+    s.mediaNote = null; s.podText = null;
     if (s.mediaJob) console.log(id, 'media result:', media ? media.slice(0, 80) : 'none');
     const plNow = media === 'PLAYER';
     const tail = media && !plNow ? (/^f-/.test(media) ? '.t-' + sp('משמיע קובץ') : '') + '.' + media + drivePrompt(s, media) : '';
@@ -3432,6 +3453,7 @@ async function doTurn(s, q, id, T0, typed) {
   } catch (e) {
     console.error(id, 'turn', s.n, 'failed after', Date.now() - T0, 'ms:', e.message, e.stderr ? '| ' + String(e.stderr).replace(/\s+/g, ' ') : '');
     s.mediaP = null;
+    s.mediaNote = null; s.podText = null;
     s.save = null;
     if (!typed) del(qn, s.d);
     return ask('t-' + problemSay(s, e, 'תור ' + s.n));
@@ -3684,10 +3706,29 @@ let songCache = { t: 0, tracks: new Map() };
 
 // reads the songs folder: the pieces grouped by song, and the files that were dropped there and still have to be cut
 let songsMissingUntil = 0;
+// the songs folder is created by the server itself when it does not exist (once in 30 minutes), so nothing has to be opened by hand in Yemot
+let songsCreateTried = 0;
+async function createSongsExt() {
+  if (Date.now() - songsCreateTried < 1800000) return false;
+  songsCreateTried = Date.now();
+  for (const type of ['menu', 'playfile']) {
+    try {
+      const r = await http(YM + 'UpdateExtension?token=' + enc(TOKEN) + '&path=' + enc('ivr2:' + SD) + '&type=' + type, {}, 10000);
+      const j = await r.json().catch(() => ({}));
+      console.log('[שירים] יצירת שלוחת השירים ' + SD + ' (' + type + '):', JSON.stringify(j).slice(0, 150));
+      if (j.responseStatus === 'OK') return true;
+    } catch (e) { console.error('[שירים] יצירת השלוחה נכשלה:', String(e.message).slice(0, 120)); }
+  }
+  return false;
+}
 async function songList(deadline) {
   if (songsMissingUntil > Date.now()) { const q = new Error('songs folder missing (checked recently)'); q.quiet = true; throw q; }
-  const r = await http(YM + 'GetIVR2Dir?token=' + enc(TOKEN) + '&path=' + enc('ivr2:' + SD), {}, 10000, deadline);
-  const j = await r.json().catch(() => ({}));
+  let r = await http(YM + 'GetIVR2Dir?token=' + enc(TOKEN) + '&path=' + enc('ivr2:' + SD), {}, 10000, deadline);
+  let j = await r.json().catch(() => ({}));
+  if (j.responseStatus !== 'OK' && /extension does not exist/.test(JSON.stringify(j)) && await createSongsExt()) {
+    r = await http(YM + 'GetIVR2Dir?token=' + enc(TOKEN) + '&path=' + enc('ivr2:' + SD), {}, 10000, deadline);
+    j = await r.json().catch(() => ({}));
+  }
   if (j.responseStatus !== 'OK' && !process.env.SONGS_EXT && /extension does not exist/.test(JSON.stringify(j))) {
     songsMissingUntil = Date.now() + 1800000; // the default folder was never created: ask again in 30 minutes, not on every request
     console.error('[שירים] השלוחה ' + SD + ' לא קיימת בימות, ולכן שירי ההמתנה כבויים. ליצור אותה, או להגדיר SONGS_EXT לשלוחה קיימת (בדיקה חוזרת בעוד 30 דקות)');
@@ -3814,7 +3855,7 @@ $('ls').onclick=async function(){try{var r=await fetch('/songs/list?phone='+ph()
 var l=$('l');l.innerHTML='';j.songs.forEach(function(s){var li=document.createElement('li');li.textContent='שיר '+s.id+' ('+s.seconds+' שניות, '+(s.owner||'לכולם')+')';var b=document.createElement('button');b.className='d';b.textContent='מחיקה';b.onclick=async function(){await fetch('/songs/delete?owner='+s.owner+'&id='+s.id,{method:'POST',headers:hd()});$('ls').click()};li.appendChild(b);l.appendChild(li)})}catch(e){say('שגיאה: '+e.message)}};
 </script></body></html>`;
 app.get('/songs', (req, res) => res.type('html').send(SONGS_PAGE));
-app.post('/songs/upload', express.raw({ type: () => true, limit: '40mb' }), async (req, res) => {
+app.post('/songs/upload', express.raw({ type: () => true, limit: '1gb' }), async (req, res) => {
   if (!SD) return res.status(400).json({ error: 'SONGS_EXT לא הוגדר בשירות' });
   if (!songsAuth(req)) return res.status(403).json({ error: 'סיסמה שגויה או שלא הוגדרה SONGS_PASS' });
   const ph = String(req.query.phone || '').replace(/\D/g, '');
