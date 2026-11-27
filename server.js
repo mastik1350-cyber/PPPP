@@ -1,6 +1,6 @@
 // ============================================================================================================
 // הרחבות (שלבים 1-8) – משתני סביבה חדשים. לכולם יש ברירת מחדל, ושום דבר לא קורס כשמשתנה חסר.
-//  שלב 1  PERSONAL_ACT_MAX (10) מגבלת פעולות רגישות בשיחה | PERSONAL_ACT_TTL_MIN (10) תוקף בקשת אישור | ATT_PLAY_MAX_MB (25) קובץ מצורף להשמעה
+//  שלב 1  PERSONAL_ACT_MAX (10) מגבלת פעולות רגישות בשיחה | PERSONAL_ACT_TTL_MIN (10) תוקף בקשת אישור | ATT_PLAY_MAX_MB (ללא הגבלה) קובץ מצורף להשמעה
 //  שלב 1  הרשאות OAuth נדרשות: gmail.modify, drive, spreadsheets
 //  השמעה  PLAYER=off מכבה את השליטה בהשמעה | PL_SEG_SEC (10) אורך קטע | PL_CHAIN (3) קטעים בכל בקשה | PL_SKIP_SEC (30) דילוג | PL_PAUSE_WAIT_SEC (30) | PL_PAUSE_MAX_MIN (3)
 //         מקשים בזמן השמעה: 5 השהיה/המשך, 4 אחורה, 6 קדימה, 0 עצירה
@@ -54,8 +54,12 @@ const G_REFRESH = String(process.env.GOOGLE_REFRESH_TOKEN || '').trim();
 const DRIVE_FOLDER_ID = String(process.env.DRIVE_FOLDER_ID || '').trim();
 const DRIVE_FOLDER_NAME = String(process.env.DRIVE_FOLDER_NAME || '').trim() || 'YouTube';
 const DRIVE_MAX_HEIGHT = parseInt(process.env.DRIVE_MAX_HEIGHT, 10) || 720;
-const DRIVE_MAX_BYTES = (parseInt(process.env.DRIVE_MAX_MB, 10) || 1024) * 1048576;
-const DRIVE_DL_MS = (parseInt(process.env.DRIVE_DL_MIN, 10) || 12) * 60000;
+// NO LIMITS by default (file size, audio length, download time). A positive number in the variable brings a limit back (0 or empty = no limit)
+const mbLimit = v => { const n = parseInt(v, 10); return n > 0 ? n * 1048576 : Infinity; };
+const minLimit = v => { const n = parseInt(v, 10); return n > 0 ? n * 60 : Infinity; };
+const tArg = sec => (Number.isFinite(sec) ? ['-t', String(sec)] : []); // ffmpeg: cut the audio only when a length limit was set
+const DRIVE_MAX_BYTES = mbLimit(process.env.DRIVE_MAX_MB);
+const DRIVE_DL_MS = (parseInt(process.env.DRIVE_DL_MIN, 10) || 360) * 60000; // 6 hours: practically no time limit
 const DRIVE_OAUTH = process.env.DRIVE_OAUTH_URL || 'https://oauth2.googleapis.com/token';
 const DRIVE_API = process.env.DRIVE_API_URL || 'https://www.googleapis.com/drive/v3/';
 const DRIVE_UPLOAD = process.env.DRIVE_UPLOAD_URL || 'https://www.googleapis.com/upload/drive/v3/files';
@@ -172,9 +176,9 @@ try { MEDIA = JSON.parse(process.env.MEDIA_FILES || '[]'); } catch (e) { MEDIA =
 MEDIA = (Array.isArray(MEDIA) ? MEDIA : []).map(m => ({ n: String((m && m.n) || '').replace(/\s+/g, ' ').trim().slice(0, 80), u: String((m && m.u) || '').trim() })).filter(m => /^https?:\/\//i.test(m.u)).slice(0, 30);
 MEDIA.forEach((m, i) => { if (!m.n) m.n = 'קובץ ' + (i + 1); });
 const HAS_MEDIA = MEDIA.length > 0;
-const MEDIA_MAX_SEC = (parseInt(process.env.MEDIA_MAX_MIN, 10) || 20) * 60;
-const MEDIA_MAX_BYTES = (parseInt(process.env.MEDIA_MAX_MB, 10) || 100) * 1048576;
-const MEDIA_PREP_MS = Number(process.env.MEDIA_PREP_MS) || 100000;
+const MEDIA_MAX_SEC = minLimit(process.env.MEDIA_MAX_MIN);
+const MEDIA_MAX_BYTES = mbLimit(process.env.MEDIA_MAX_MB);
+const MEDIA_PREP_MS = Number(process.env.MEDIA_PREP_MS) || 21600000; // 6 hours: practically no time limit
 const MEDIA_HINT = ' יש לך קבצי שמע שאפשר להשמיע למתקשר. הפעל את הכלי play_media אך ורק אם המשתמש ביקש במפורש לנגן או להשמיע קובץ, והעבר את מספר הקובץ מהרשימה. אם יש רק קובץ אחד והמשתמש ביקש לנגן את הקובץ, הפעל אותו. הקבצים: ' + MEDIA.map((m, i) => (i + 1) + ' ' + m.n).join(', ') + '. אחרי שהפעלת את הכלי ענה במשפט קצר אחד בלבד שאתה מנגן עכשיו את הקובץ, בלי להקריא כתובות.';
 // history is kept as text only, so a recorded question needs a transcript: the model adds it as a tag that the server strips
 const TRANSCRIBE_HINT = ' אם השאלה הגיעה כהקלטה קולית, התחל את התשובה בתג [[Q:תמלול מדויק של השאלה במילים]] ואחריו התשובה עצמה. לשאלה שהוקלדה אל תוסיף את התג. לעולם אל תזכיר את התג בטקסט אחר.';
@@ -442,7 +446,7 @@ async function prepareMedia(m, d, dl0, s) {
   const tmp = path.join(os.tmpdir(), name + '-' + crypto.randomBytes(3).toString('hex'));
   try {
     announce(s, 'מוריד קובץ לשרת');
-    const r = await http(m.u, { redirect: 'follow' }, 60000, dl);
+    const r = await http(m.u, { redirect: 'follow' }, Math.max(60000, dl - Date.now()), dl);
     if (!r.ok) throw new Error('media download ' + r.status);
     if (Number(r.headers.get('content-length') || 0) > MEDIA_MAX_BYTES) throw new Error('media file too large');
     const out = fs.createWriteStream(tmp + '.in');
@@ -462,13 +466,13 @@ async function prepareMedia(m, d, dl0, s) {
     let buf;
     if (FFMPEG) {
       announce(s, 'מחלץ אודיו');
-      await ffmpegRun(['-i', tmp + '.in', '-vn', '-t', String(MEDIA_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()), limit: MEDIA_MAX_SEC, s });
+      await ffmpegRun(['-i', tmp + '.in', '-vn', ...tArg(MEDIA_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()), limit: MEDIA_MAX_SEC, s });
       buf = fs.readFileSync(tmp + '.wav');
     } else {
       buf = fs.readFileSync(tmp + '.in'); // no ffmpeg: Yemot converts the upload itself (works for mp3 and wav)
     }
     announce(s, 'מכין את הקובץ להשמעה');
-    await upload(name, buf, dl, d, 60000);
+    await upload(name, buf, dl, d, Math.max(60000, dl - Date.now()));
     mediaDone[key] = true;
     return { name };
   } finally {
@@ -629,7 +633,7 @@ async function ytDownload(url, dir, dl, s, pr) {
         // YouTube's JavaScript challenge needs a JS runtime: the Node that runs this server, plus the solver script from GitHub
         '--js-runtimes', 'node:' + process.execPath, '--remote-components', 'ejs:github',
         ...(t.c ? ['--extractor-args', 'youtube:player_client=' + t.c] : []), ...ytArgs(!t.ck)],
-        { timeout: Math.min(left(), t.c ? 25000 : 60000) }, ytProgress(f => pr && pr.set(Math.min(100, f * 100 / 0.9)))); // one audio stream: ytProgress ends it at 0.9
+        { timeout: left() }, ytProgress(f => pr && pr.set(Math.min(100, f * 100 / 0.9)))); // one audio stream: ytProgress ends it at 0.9
       file = stdout.trim().split('\n').pop().trim();
       if (file && fs.existsSync(file)) { if (t.c) console.log('youtube download ok with client', t.c); break; }
       file = '';
@@ -665,9 +669,9 @@ async function prepareYoutube(item, d, dl, s) {
     const file = await ytDownload(item.url, dir, dl, s, pr);
     await voiceCheck(file, key, dl);
     announce(s, 'ההורדה הסתיימה. מחלץ אודיו');
-    await ffmpegRun(['-i', file, '-vn', '-t', String(MEDIA_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', path.join(dir, 'out.wav')], { timeout: left(), limit: MEDIA_MAX_SEC });
+    await ffmpegRun(['-i', file, '-vn', ...tArg(MEDIA_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', path.join(dir, 'out.wav')], { timeout: left(), limit: MEDIA_MAX_SEC });
     announce(s, 'מכין את הקובץ להשמעה');
-    await upload(name, fs.readFileSync(path.join(dir, 'out.wav')), dl, d, 60000);
+    await upload(name, fs.readFileSync(path.join(dir, 'out.wav')), dl, d, Math.max(60000, dl - Date.now()));
     mediaDone[key] = true;
     return { name };
   } finally {
@@ -935,11 +939,11 @@ async function ytDownloadVideo(url, dir, dl, job) {
     if (dl - Date.now() < 15000) break;
     try {
       const { stdout } = await runLines(YTDLP, [url, '--no-playlist', ...YT_PRG_ARGS, '--no-warnings', '-f', fmt,
-        '--merge-output-format', 'mp4', '--remux-video', 'mp4', '--max-filesize', String(DRIVE_MAX_BYTES),
+        '--merge-output-format', 'mp4', '--remux-video', 'mp4', ...(Number.isFinite(DRIVE_MAX_BYTES) ? ['--max-filesize', String(DRIVE_MAX_BYTES)] : []),
         '-o', path.join(dir, 'video.%(ext)s'), '--print', 'after_move:filepath', '--no-simulate', '--ffmpeg-location', FFMPEG,
         '--js-runtimes', 'node:' + process.execPath, '--remote-components', 'ejs:github',
         ...(c ? ['--extractor-args', 'youtube:player_client=' + c] : []), ...ytArgs()],
-        { timeout: Math.min(left(), c ? 300000 : 600000) }, ytProgress(f => job && job.set(DL_SHARE * f)));
+        { timeout: left() }, ytProgress(f => job && job.set(DL_SHARE * f)));
       file = stdout.trim().split('\n').pop().trim();
       if (file && fs.existsSync(file)) break;
       file = '';
@@ -956,7 +960,7 @@ async function saveToDrive(item, job) {
   const t0 = Date.now();
   try {
     job.step = 'download';
-    console.log('[drive] 1/3 download started:', String(item.title || '').slice(0, 60), '(up to ' + DRIVE_MAX_HEIGHT + 'p, limit ' + Math.round(DRIVE_MAX_BYTES / 1048576) + 'MB, ' + Math.round(DRIVE_DL_MS / 60000) + ' min)');
+    console.log('[drive] 1/3 download started:', String(item.title || '').slice(0, 60), '(up to ' + DRIVE_MAX_HEIGHT + 'p, limit ' + (Number.isFinite(DRIVE_MAX_BYTES) ? Math.round(DRIVE_MAX_BYTES / 1048576) + 'MB' : 'none') + ', ' + Math.round(DRIVE_DL_MS / 60000) + ' min)');
     const file = await ytDownloadVideo(item.url, dir, Date.now() + DRIVE_DL_MS, job);
     job.set(DL_SHARE);
     console.log('[drive] 2/3 download ok:', Math.round(fs.statSync(file).size / 1048576) + 'MB in ' + Math.round((Date.now() - t0) / 1000) + 's');
@@ -1211,8 +1215,8 @@ const HAS_PERSONAL = PERSONAL_ON && HAS_GOOGLE && PERSONAL_PIN.length >= 4 && PE
 const GMAIL_API = process.env.GMAIL_API_URL || 'https://gmail.googleapis.com/gmail/v1/users/me/';
 const READ_MAX = 6000;
 const INLINE_MAX = 12 * 1048576;
-const PLAY_MAX_BYTES = (parseInt(process.env.DRIVE_PLAY_MAX_MB, 10) || 500) * 1048576;
-const PLAY_MAX_SEC = (parseInt(process.env.DRIVE_PLAY_MAX_MIN, 10) || 20) * 60;
+const PLAY_MAX_BYTES = mbLimit(process.env.DRIVE_PLAY_MAX_MB);
+const PLAY_MAX_SEC = minLimit(process.env.DRIVE_PLAY_MAX_MIN);
 const MAIL_SEND_MAX = parseInt(process.env.MAIL_SEND_MAX, 10) || 5;
 const EMAIL_RE = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 // MAIL_CONTACTS="אמא=mom@example.com;עבודה=boss@example.com": names that can be said instead of an address
@@ -1392,7 +1396,7 @@ async function prepareDriveFile(f, d, dl0, s) {
   const tmp = path.join(os.tmpdir(), name + '-' + crypto.randomBytes(3).toString('hex'));
   try {
     announce(s, 'מוריד קובץ מהדרייב לשרת');
-    const r = await gReq('drive file', DRIVE_API + 'files/' + f.id + '?alt=media&supportsAllDrives=true', {}, 120000, dl);
+    const r = await gReq('drive file', DRIVE_API + 'files/' + f.id + '?alt=media&supportsAllDrives=true', {}, Math.max(120000, dl - Date.now()), dl);
     const out = fs.createWriteStream(tmp + '.in');
     const reader = r.body.getReader();
     const prDl = makeProg(s, 'הורדה'), total = Number(f.size || 0);
@@ -1409,12 +1413,12 @@ async function prepareDriveFile(f, d, dl0, s) {
     let buf;
     if (FFMPEG) {
       announce(s, 'מחלץ אודיו');
-      await ffmpegRun(['-i', tmp + '.in', '-vn', '-t', String(PLAY_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()), limit: PLAY_MAX_SEC, s });
+      await ffmpegRun(['-i', tmp + '.in', '-vn', ...tArg(PLAY_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()), limit: PLAY_MAX_SEC, s });
       buf = fs.readFileSync(tmp + '.wav');
     } else buf = fs.readFileSync(tmp + '.in');
     if (FFMPEG && PLAYER_ON) return { wav: buf, title: shortName(f.name) };
     announce(s, 'מכין את הקובץ להשמעה');
-    await upload(name, buf, dl, d, 60000);
+    await upload(name, buf, dl, d, Math.max(60000, dl - Date.now()));
     mediaDone[key] = true;
     return { name };
   } finally {
@@ -1566,10 +1570,10 @@ async function mailSendTool(s, args, deadline) {
 // משתני סביבה חדשים (להוסיף את התיעוד לבראש הקובץ):
 //   PERSONAL_ACT_MAX      מספר הפעולות הרגישות (מחיקה / שיתוף) המותרות בשיחה אחת. ברירת מחדל 10
 //   PERSONAL_ACT_TTL_MIN  כמה דקות בקשת אישור קולי תקפה. ברירת מחדל 10
-//   ATT_PLAY_MAX_MB       גודל מקסימלי של קובץ מצורף במייל שמושמע. ברירת מחדל 25
+//   ATT_PLAY_MAX_MB       גודל מקסימלי של קובץ מצורף במייל שמושמע. ברירת מחדל: ללא הגבלה (מספר חיובי מחזיר מגבלה)
 const ACT_MAX = parseInt(process.env.PERSONAL_ACT_MAX, 10) || 10;
 const ACT_TTL = (parseInt(process.env.PERSONAL_ACT_TTL_MIN, 10) || 10) * 60000;
-const ATT_PLAY_MAX = (parseInt(process.env.ATT_PLAY_MAX_MB, 10) || 25) * 1048576;
+const ATT_PLAY_MAX = mbLimit(process.env.ATT_PLAY_MAX_MB);
 
 // the scopes of the Google token (filled by personalStartupCheck); null = unknown, so nothing is blocked in advance
 let G_SCOPES = null;
@@ -1727,12 +1731,12 @@ async function prepareAttachment(m0, a, d, dl0, s) {
     let buf;
     if (FFMPEG) {
       announce(s, 'מחלץ אודיו');
-      await ffmpegRun(['-i', tmp + '.in', '-vn', '-t', String(PLAY_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()), limit: PLAY_MAX_SEC, s });
+      await ffmpegRun(['-i', tmp + '.in', '-vn', ...tArg(PLAY_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()), limit: PLAY_MAX_SEC, s });
       buf = fs.readFileSync(tmp + '.wav');
     } else buf = raw;
     if (FFMPEG && PLAYER_ON) return { wav: buf, title: shortName(a.name) };
     announce(s, 'מכין את הקובץ להשמעה');
-    await upload(name, buf, dl, d, 60000);
+    await upload(name, buf, dl, d, Math.max(60000, dl - Date.now()));
     mediaDone[key] = true;
     return { name };
   } finally {
@@ -2579,7 +2583,7 @@ async function takeMedia(s) {
   if (r && r.wav) {
     if (PLAYER_ON) { startPlayer(s, r); return 'PLAYER'; }
     const pn = 'pg' + s.e + String(Date.now() % 100000);
-    await upload(pn, r.wav, Date.now() + 60000, s.d, 60000);
+    await upload(pn, r.wav, Date.now() + 1800000, s.d, 1800000);
     return 'f-' + s.d + '/' + pn;
   }
   if (r && r.name) return 'f-' + s.d + '/' + r.name;
@@ -3673,7 +3677,7 @@ const SONGS_PASS = String(process.env.SONGS_PASS || '');
 const SEG_SEC = Math.min(30, Math.max(3, parseInt(process.env.SONG_SEG_SEC, 10) || 5));
 const HOLD_CHAIN = Math.min(6, Math.max(1, parseInt(process.env.HOLD_CHAIN, 10) || 2));
 const HOLD_LAG_MS = 1200;
-const SONG_MAX_SEC = (parseInt(process.env.SONG_MAX_MIN, 10) || 6) * 60;
+const SONG_MAX_SEC = minLimit(process.env.SONG_MAX_MIN);
 const SONG_RE = 'h(?:p(\\d{7,15}))?s([0-9a-f]{6})x(\\d{3})\\.wav';
 const enc = encodeURIComponent;
 let songCache = { t: 0, tracks: new Map() };
@@ -3725,7 +3729,7 @@ async function ingestSong(buf, owner) {
   const done = [];
   try {
     fs.writeFileSync(path.join(dir, 'in.bin'), buf);
-    await ffmpegRun(['-i', path.join(dir, 'in.bin'), '-vn', '-t', String(SONG_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'segment', '-segment_time', String(SEG_SEC), '-reset_timestamps', '1', path.join(dir, 'p%03d.wav')], { timeout: 120000, limit: SONG_MAX_SEC });
+    await ffmpegRun(['-i', path.join(dir, 'in.bin'), '-vn', ...tArg(SONG_MAX_SEC), '-af', PHONE_AF, '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'segment', '-segment_time', String(SEG_SEC), '-reset_timestamps', '1', path.join(dir, 'p%03d.wav')], { timeout: 1800000, limit: SONG_MAX_SEC });
     const files = fs.readdirSync(dir).filter(f => /^p\d{3}\.wav$/.test(f)).sort();
     if (!files.length) throw new Error('הקובץ לא זוהה כקובץ שמע');
     const dl = Date.now() + 240000;
